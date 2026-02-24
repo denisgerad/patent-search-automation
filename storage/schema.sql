@@ -1,24 +1,14 @@
 -- storage/schema.sql
--- Existing MySQL schema for patent_db.patents (reflected, not recreated).
--- This file documents the real table structure for reference.
---
--- PatentRecord field → MySQL column mapping:
---   patent_id       → patent_number   (UNIQUE business key)
---   patent_title    → title
---   patent_abstract → abstract
---   patent_type     → metadata        (text field; stores type string)
---   patent_date     → publication_date
+-- DDL for the patents table in patent_db (MySQL).
+-- Column names match PatentRecord fields exactly — no mapping required.
+-- Created automatically by storage.database.create_tables() on first run.
 
 CREATE TABLE IF NOT EXISTS patents (
-    id               INT          NOT NULL AUTO_INCREMENT,
-    patent_number    VARCHAR(100) NOT NULL,
-    title            TEXT,
-    link             TEXT,
-    metadata         TEXT,                    -- used to store patent_type
-    publication_date DATE,
-    abstract         TEXT,
-    claims           LONGTEXT,
-    created_at       TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (id),
-    UNIQUE KEY uq_patent_number (patent_number)  -- added by pipeline at startup
+    patent_id       VARCHAR(64)  NOT NULL,
+    patent_title    TEXT         NOT NULL,
+    patent_abstract TEXT,
+    patent_type     VARCHAR(64),
+    patent_date     VARCHAR(16),          -- ISO date string e.g. '2023-05-09'
+    created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (patent_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

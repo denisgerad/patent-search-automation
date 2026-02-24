@@ -1,20 +1,17 @@
 """
 storage/database.py
 
-SQLAlchemy Core engine and table reflection for the patent-search pipeline.
+SQLAlchemy Core engine and table definition for the patent-search pipeline.
 
-The patents table already exists in patent_db with the schema defined in
-schema.sql.  We reflect it at startup rather than recreating it, which
-means the existing data and any existing columns are preserved.
-
-A UNIQUE constraint on patent_number is added automatically if not present
-(needed for the ON DUPLICATE KEY UPDATE upsert in patent_repository.py).
+Uses the MySQL credentials from settings (loaded from .env) and creates the
+patents table with column names that match PatentRecord fields directly —
+no column mapping needed anywhere in the codebase.
 
 Exports
 -------
 engine          — the shared SQLAlchemy Engine instance
-patents_table   — reflected Table object (all columns available)
-create_tables() — no-op for already-existing tables; kept for API consistency
+patents_table   — the Table metadata object (used in all queries)
+create_tables() — creates the patents table if it does not exist
 """
 
 from __future__ import annotations
@@ -22,10 +19,18 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from sqlalchemy import MetaData, Table, create_engine, inspect, text
+from sqlalchemy import (
+    Column,
+    DateTime,
+    MetaData,
+    String,
+    Table,
+    Text,
+    create_engine,
+    func,
+)
 from sqlalchemy.engine import Engine
 
-# Ensure project root is importable
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import settings  # noqa: E402
@@ -39,7 +44,6 @@ log = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 def _make_engine() -> Engine:
-    """Create and return a SQLAlchemy Engine from settings.db_url."""
     url: str = settings.db_url
     engine = create_engine(url, echo=False, pool_pre_ping=True)
     safe_url = url.split("@")[-1] if "@" in url else url
@@ -50,35 +54,31 @@ def _make_engine() -> Engine:
 engine: Engine = _make_engine()
 
 # ---------------------------------------------------------------------------
-# Reflect the existing patents table
+# Schema — column names match PatentRecord fields exactly
 # ---------------------------------------------------------------------------
 
 metadata = MetaData()
-patents_table = Table("patents", metadata, autoload_with=engine)
 
-
-def _ensure_unique_constraint() -> None:
-    """Add UNIQUE KEY on patent_number if it does not already exist.
-
-    This is required for ON DUPLICATE KEY UPDATE to treat patent_number as
-    the business-key deduplication column.
-    """
-    insp = inspect(engine)
-    unique_constraints = insp.get_unique_constraints("patents")
-    unique_cols = {col for uc in unique_constraints for col in uc["column_names"]}
-    if "patent_number" not in unique_cols:
-        with engine.begin() as conn:
-            conn.execute(
-                text("ALTER TABLE patents ADD UNIQUE KEY uq_patent_number (patent_number)")
-            )
-        log.info("Added UNIQUE constraint on patents.patent_number")
-    else:
-        log.debug("UNIQUE constraint on patent_number already exists")
-
-
-_ensure_unique_constraint()
+patents_table = Table(
+    "patents",
+    metadata,
+    Column("patent_id",       String(64),   primary_key=True),
+    Column("patent_title",    Text,         nullable=False),
+    Column("patent_abstract", Text,         nullable=True),
+    Column("patent_type",     String(64),   nullable=True),
+    Column("patent_date",     String(16),   nullable=True),  # e.g. '2023-05-09'
+    Column(
+        "created_at",
+        DateTime,
+        server_default=func.now(),
+        nullable=False,
+    ),
+    mysql_engine="InnoDB",
+    mysql_charset="utf8mb4",
+)
 
 
 def create_tables() -> None:
-    """No-op stub kept for API consistency (table already exists in MySQL)."""
-    log.debug("create_tables() called — patents table already exists, skipping")
+    """Create the patents table if it does not already exist (idempotent)."""
+    metadata.create_all(engine)
+    log.info("Tables created / verified", extra={"tables": list(metadata.tables.keys())})

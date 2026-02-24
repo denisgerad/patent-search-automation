@@ -36,6 +36,19 @@ from utils.logger import get_logger  # noqa: E402
 
 log = get_logger(__name__)
 
+# Words that carry no technical meaning for patent search.
+# Passing them to PatentsView _text_any causes irrelevant results because
+# common words like "system", "using", "for" match thousands of patents.
+_STOP_WORDS: frozenset[str] = frozenset({
+    "a", "an", "the", "and", "or", "of", "in", "for", "to", "with",
+    "by", "on", "at", "from", "is", "are", "was", "were", "be", "been",
+    "being", "have", "has", "had", "do", "does", "did", "will", "would",
+    "could", "should", "may", "might", "shall", "can", "that", "this",
+    "these", "those", "it", "its", "which", "who", "what", "where",
+    "when", "how", "using", "used", "use", "based", "related", "via",
+    "system", "method", "device", "apparatus", "process", "technique",
+})
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -53,12 +66,41 @@ def _build_headers() -> dict:
     return headers
 
 
+def _strip_stop_words(term: str) -> str:
+    """
+    Remove stop words and single-character tokens from *term*.
+
+    PatentsView _text_any tokenises the query string and matches patents
+    containing ANY of those tokens.  Keeping stop words causes common English
+    words to dominate and return completely irrelevant results.
+
+    Returns the original term unchanged if stripping would leave nothing.
+    """
+    tokens = [
+        w for w in term.lower().split()
+        if w not in _STOP_WORDS and len(w) > 2
+    ]
+    cleaned = " ".join(tokens)
+    if not cleaned:
+        log.warning("Stop-word stripping left empty query; using original",
+                    extra={"original": term})
+        return term
+    log.debug("Query cleaned", extra={"original": term, "cleaned": cleaned})
+    return cleaned
+
+
 def _build_term_query(term: str) -> dict:
-    """Build a PatentsView query that searches *term* in title and abstract."""
+    """Build a PatentsView query that searches *term* in title and abstract.
+
+    Stop words are stripped first so that broad sentences (e.g. from the raw
+    user input or Mistral output) are reduced to their technical keywords
+    before being sent to the API.
+    """
+    cleaned = _strip_stop_words(term)
     return {
         "_or": [
-            {"_text_any": {"patent_title": term}},
-            {"_text_any": {"patent_abstract": term}},
+            {"_text_any": {"patent_title": cleaned}},
+            {"_text_any": {"patent_abstract": cleaned}},
         ]
     }
 

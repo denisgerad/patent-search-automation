@@ -247,7 +247,12 @@ with tab_search:
 # ── Tab 3: Top 20 Ranked ─────────────────────────────────────────────────────
 with tab_rank:
     if st.session_state.ranked:
-        st.success(f"Top {len(st.session_state.ranked)} patents by hybrid score")
+        total_unique = len(st.session_state.unique_patents)
+        shown = len(st.session_state.ranked)
+        st.success(
+            f"Top {shown} of {total_unique} unique patent(s) ranked by hybrid score"
+            + (f" (requested top-{top_k})" if shown < top_k else "")
+        )
 
         rows = []
         for i, rp in enumerate(st.session_state.ranked, 1):

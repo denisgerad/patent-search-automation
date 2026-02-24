@@ -105,13 +105,16 @@ def rank(
     # --- Sort and truncate ---
     sorted_idx = np.argsort(hybrid)[::-1][:k]
 
+    # Normalise BM25 to [0, 1] for consistent display alongside cosine scores.
+    bm25_norm = normalize(np.array(bm25, dtype=float))
+
     ranked: list[RankedPatent] = []
     for i in sorted_idx:
         ranked.append(
             RankedPatent(
                 patent=patents[i],
                 cosine_score=float(cosine[i]),
-                bm25_score=float(bm25[i]),
+                bm25_score=float(bm25_norm[i]),   # normalised to [0, 1]
                 hybrid_score=float(hybrid[i]),
             )
         )

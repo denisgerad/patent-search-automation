@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.search_service import fetch_patents_by_keywords  # noqa: E402
 from services.dedup_service import deduplicate                  # noqa: E402
+from models.schemas import PatentRecord                         # noqa: E402
 
 
 # ===========================================================================
@@ -220,6 +221,15 @@ class TestSearchServiceLimits:
 # dedup_service
 # ===========================================================================
 
+# ---------------------------------------------------------------------------
+# Helpers for dedup tests: convert raw fixture dicts → PatentRecord objects
+# ---------------------------------------------------------------------------
+
+def _to_records(raw_list: list[dict]) -> list[PatentRecord]:
+    """Convert a list of fixture dicts to PatentRecord objects."""
+    return [PatentRecord(**d) for d in raw_list]
+
+
 class TestDedupService:
 
     def test_removes_duplicate_patent_ids(self, fx_with_duplicates):
@@ -227,34 +237,40 @@ class TestDedupService:
         fx_with_duplicates contains 4 records where IDs 11000001 and 11000002
         each appear twice.  deduplicate must return exactly 2 unique records.
         """
-        patents = fx_with_duplicates["patents"]
+        patents = _to_records(fx_with_duplicates["patents"])
         assert len(patents) == 4  # sanity-check fixture
 
         result = deduplicate(patents)
 
         assert len(result) == 2
-        returned_ids = [p["patent_id"] for p in result]
+        assert isinstance(result[0], PatentRecord)
+        returned_ids = [p.patent_id for p in result]
         assert returned_ids == ["11000001", "11000002"]
 
     def test_preserves_order_of_first_occurrence(self, fx_with_duplicates):
         """First occurrence of each patent_id must be the one kept."""
-        patents = fx_with_duplicates["patents"]
+        patents = _to_records(fx_with_duplicates["patents"])
         result = deduplicate(patents)
-        assert result[0]["patent_id"] == "11000001"
-        assert result[1]["patent_id"] == "11000002"
+        assert result[0].patent_id == "11000001"
+        assert result[1].patent_id == "11000002"
 
     def test_no_duplicates_unchanged(self, fx_page_full):
         """A list with no duplicates must pass through untouched."""
-        patents = fx_page_full["patents"]
+        patents = _to_records(fx_page_full["patents"])
         result = deduplicate(patents)
         assert len(result) == len(patents)
-        assert [p["patent_id"] for p in result] == [p["patent_id"] for p in patents]
+        assert [p.patent_id for p in result] == [p.patent_id for p in patents]
 
     def test_empty_list_returns_empty(self):
         assert deduplicate([]) == []
 
-    def test_missing_patent_id_record_is_kept(self):
-        """Records with no patent_id must be kept (not silently dropped)."""
-        patents = [{"patent_title": "No ID here"}]
-        result = deduplicate(patents)
-        assert len(result) == 1
+    def test_returns_patent_record_objects(self):
+        """Return type must be list[PatentRecord], not list[dict]."""
+        records = [
+            PatentRecord(patent_id="X001", patent_title="Alpha"),
+            PatentRecord(patent_id="X002", patent_title="Beta"),
+            PatentRecord(patent_id="X001", patent_title="Alpha duplicate"),
+        ]
+        result = deduplicate(records)
+        assert len(result) == 2
+        assert all(isinstance(p, PatentRecord) for p in result)

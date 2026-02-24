@@ -1,17 +1,20 @@
 """
 storage/database.py
 
-SQLAlchemy Core engine and table definitions for the patent-search pipeline.
+SQLAlchemy Core engine and table reflection for the patent-search pipeline.
 
-Uses SQLAlchemy Core (no ORM) for simplicity, as specified in the architecture.
-The engine is created once from settings.db_url (defaults to
-sqlite:///data/patents.db) and shared across all repository calls.
+The patents table already exists in patent_db with the schema defined in
+schema.sql.  We reflect it at startup rather than recreating it, which
+means the existing data and any existing columns are preserved.
+
+A UNIQUE constraint on patent_number is added automatically if not present
+(needed for the ON DUPLICATE KEY UPDATE upsert in patent_repository.py).
 
 Exports
 -------
 engine          — the shared SQLAlchemy Engine instance
-patents_table   — the Table metadata object (used in all queries)
-create_tables() — call once at startup (or in tests) to create the schema
+patents_table   — reflected Table object (all columns available)
+create_tables() — no-op for already-existing tables; kept for API consistency
 """
 
 from __future__ import annotations
@@ -19,16 +22,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from sqlalchemy import (
-    Column,
-    DateTime,
-    MetaData,
-    String,
-    Table,
-    Text,
-    create_engine,
-    func,
-)
+from sqlalchemy import MetaData, Table, create_engine, inspect, text
 from sqlalchemy.engine import Engine
 
 # Ensure project root is importable
@@ -41,47 +35,50 @@ log = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Engine — created once from settings.db_url
+# Engine
 # ---------------------------------------------------------------------------
 
 def _make_engine() -> Engine:
     """Create and return a SQLAlchemy Engine from settings.db_url."""
     url: str = settings.db_url
-    # For SQLite, ensure the parent directory exists
-    if url.startswith("sqlite:///"):
-        db_path = Path(url.replace("sqlite:///", ""))
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-    engine = create_engine(url, echo=False)
-    log.info("Database engine created", extra={"db_url": url})
+    engine = create_engine(url, echo=False, pool_pre_ping=True)
+    safe_url = url.split("@")[-1] if "@" in url else url
+    log.info("Database engine created", extra={"db": safe_url})
     return engine
 
 
 engine: Engine = _make_engine()
 
 # ---------------------------------------------------------------------------
-# Schema — SQLAlchemy Core table definitions
+# Reflect the existing patents table
 # ---------------------------------------------------------------------------
 
 metadata = MetaData()
+patents_table = Table("patents", metadata, autoload_with=engine)
 
-patents_table = Table(
-    "patents",
-    metadata,
-    Column("patent_id",       String(32),  primary_key=True),
-    Column("patent_title",    Text,        nullable=False),
-    Column("patent_abstract", Text,        nullable=True),
-    Column("patent_type",     String(64),  nullable=True),
-    Column("patent_date",     String(16),  nullable=True),  # ISO date e.g. 2023-05-09
-    Column(
-        "created_at",
-        DateTime,
-        server_default=func.now(),
-        nullable=False,
-    ),
-)
+
+def _ensure_unique_constraint() -> None:
+    """Add UNIQUE KEY on patent_number if it does not already exist.
+
+    This is required for ON DUPLICATE KEY UPDATE to treat patent_number as
+    the business-key deduplication column.
+    """
+    insp = inspect(engine)
+    unique_constraints = insp.get_unique_constraints("patents")
+    unique_cols = {col for uc in unique_constraints for col in uc["column_names"]}
+    if "patent_number" not in unique_cols:
+        with engine.begin() as conn:
+            conn.execute(
+                text("ALTER TABLE patents ADD UNIQUE KEY uq_patent_number (patent_number)")
+            )
+        log.info("Added UNIQUE constraint on patents.patent_number")
+    else:
+        log.debug("UNIQUE constraint on patent_number already exists")
+
+
+_ensure_unique_constraint()
 
 
 def create_tables() -> None:
-    """Create all tables in the database (idempotent — safe to call repeatedly)."""
-    metadata.create_all(engine)
-    log.info("Tables created / verified", extra={"tables": list(metadata.tables.keys())})
+    """No-op stub kept for API consistency (table already exists in MySQL)."""
+    log.debug("create_tables() called — patents table already exists, skipping")

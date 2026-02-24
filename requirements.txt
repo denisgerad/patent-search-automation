@@ -25,7 +25,8 @@ ollama>=0.2                     # local Mistral via Ollama
 openai>=1.12.0                  # optional GPT support
 
 # Storage
-sqlalchemy>=2.0                 # SQLite / Postgres repository layer
+sqlalchemy>=2.0                 # MySQL / Postgres repository layer
+mysql-connector-python>=8.0     # MySQL driver for SQLAlchemy (mysql+mysqlconnector://)
 
 # API Layer (future SaaS exposure)
 fastapi>=0.110

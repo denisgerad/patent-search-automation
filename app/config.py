@@ -16,7 +16,7 @@ defined below the Settings class — set to None to disable.
 
 from pathlib import Path
 from typing import Optional
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -68,10 +68,29 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     top_k_results: int = 20   # patents forwarded to LLM comparison stage
 
-    # SQLAlchemy database URL. Defaults to a SQLite file inside data/.
-    db_url: str = "sqlite:///" + str(
-        Path(__file__).resolve().parents[1] / "data" / "patents.db"
-    )
+    # ------------------------------------------------------------------
+    # MySQL database credentials (read from .env)
+    # ------------------------------------------------------------------
+    db_host: str = "localhost"
+    db_user: str = "root"
+    db_password: str = ""
+    db_name: str = "patent_db"
+
+    # Constructed automatically from the four fields above.
+    # Can be overridden by setting db_url directly in .env.
+    db_url: str = ""
+
+    @model_validator(mode="after")
+    def _build_db_url(self) -> "Settings":
+        """Build db_url from individual credential fields if not set explicitly."""
+        if not self.db_url:
+            from urllib.parse import quote_plus
+            pwd = quote_plus(self.db_password)
+            self.db_url = (
+                f"mysql+mysqlconnector://{self.db_user}:{pwd}"
+                f"@{self.db_host}/{self.db_name}"
+            )
+        return self
 
     # PatentsView fields requested on every query.
     # Stored as a list; pydantic-settings reads comma-separated values from .env.

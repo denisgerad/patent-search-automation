@@ -1,0 +1,57 @@
+patent-intelligence/
+│
+├── app/                         # Application entrypoints
+│   ├── main.py                  # CLI or local runner
+│   ├── api.py                   # FastAPI entrypoint (future SaaS)
+│   └── config.py                # Central configuration
+│
+├── orchestrator/
+│   └── patent_pipeline.py       # Deterministic orchestration layer
+│
+├── services/
+│   ├── query_expansion.py
+│   ├── search_service.py
+│   ├── extraction_service.py
+│   ├── embedding_service.py
+│   ├── ranking_service.py
+│   ├── comparison_service.py
+│   └── report_service.py
+│
+├── models/                      # Model wrappers only (NO logic)
+│   ├── mistral_client.py
+│   ├── claude_client.py
+│   ├── embedding_model.py
+│   └── schemas.py               # Pydantic models / data contracts
+│
+├── retrieval/
+│   ├── bm25_ranker.py
+│   ├── vector_store.py
+│   └── similarity.py
+│
+├── data/
+│   ├── raw/                     # Raw API responses
+│   ├── processed/               # Cleaned patent docs
+│   └── vectors/                 # FAISS index (optional)
+│
+├── storage/
+│   ├── database.py              # DB connection
+│   ├── patent_repository.py     # CRUD logic
+│   └── schema.sql
+│
+├── utils/
+│   ├── logger.py
+│   ├── helpers.py
+│   └── text_cleaning.py
+│
+├── tests/
+│   ├── test_search.py
+│   ├── test_ranking.py
+│   └── test_pipeline.py
+│
+├── requirements.txt
+├── .env
+└── README.md
+
+
+https://patentsview.org/apis/api-endpoints/patents
+DSSVf6t3.AhJnfJBoDf6kiswrtsdnN9ECVvKiINBH

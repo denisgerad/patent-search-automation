@@ -1,0 +1,37 @@
+{
+  "error": false,
+  "count": 5,
+  "total_hits": 8,
+  "patents": [
+    {
+      "patent_id": "11000001",
+      "patent_title": "Machine learning model compression using knowledge distillation",
+      "patent_abstract": "A method for compressing deep neural network models by transferring knowledge from a large teacher network to a smaller student network using soft probability targets.",
+      "patent_type": "utility"
+    },
+    {
+      "patent_id": "11000002",
+      "patent_title": "Federated learning system for distributed model training",
+      "patent_abstract": "A system enabling multiple edge devices to collaboratively train a shared neural network model without sharing raw data, preserving user privacy.",
+      "patent_type": "utility"
+    },
+    {
+      "patent_id": "11000003",
+      "patent_title": "Attention mechanism for natural language processing",
+      "patent_abstract": "A transformer-based self-attention mechanism that computes contextual representations of tokens in a sequence for downstream NLP classification tasks.",
+      "patent_type": "utility"
+    },
+    {
+      "patent_id": "11000004",
+      "patent_title": "Automated hyperparameter optimisation using Bayesian search",
+      "patent_abstract": "A method for selecting optimal neural network hyperparameters by modelling the objective function as a Gaussian process and using acquisition functions to guide search.",
+      "patent_type": "utility"
+    },
+    {
+      "patent_id": "11000005",
+      "patent_title": "Graph neural network for molecular property prediction",
+      "patent_abstract": "A graph convolutional network architecture that encodes molecular graphs and predicts chemical properties useful in drug discovery pipelines.",
+      "patent_type": "utility"
+    }
+  ]
+}

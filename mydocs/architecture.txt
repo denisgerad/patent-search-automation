@@ -1,0 +1,353 @@
+Patent Intelligence Automation
+Step-by-Step Implementation Guide
+Architecture Review • Code Patterns • Integration Strategy
+Stack
+PatentsView API, Mistral 7B, BGE-large, BM25, Claude 3.5
+Language
+Python 3.11+
+Framework
+FastAPI + SQLite/Postgres
+Version
+v1.0 — Implementation Blueprint
+
+1. Project Structure Review
+Your proposed structure is well-architected and follows clean separation of concerns. Below is an assessment of each layer and specific recommendations before you write a single line of implementation code.
+
+1.1 What You Got Right
+    • models/ holds only wrappers — no business logic. This is a critical discipline that prevents tight coupling.
+    • services/ owns all business logic, cleanly mapped 1:1 to pipeline stages.
+    • retrieval/ is correctly separated from services/ — BM25 and vector operations are infrastructure, not business logic.
+    • orchestrator/patent_pipeline.py as a single deterministic entry point makes the pipeline easy to test, replay, and debug.
+    • data/ splits raw vs. processed vs. vectors — essential for reproducibility and re-running stages without re-fetching.
+
+1.2 Recommended Additions
+Addition
+Reason
+prompts/
+Store all LLM prompt templates as .txt or .jinja2 files — never hardcode in service files
+services/dedup_service.py
+USPTO + PatentsView overlap is real; deduplication on patent_id before embedding saves compute
+retrieval/bm25_index.py
+Separate BM25 index build from bm25_ranker.py query logic
+tests/fixtures/
+Sample API responses for offline unit testing — critical for CI without live API calls
+notebooks/
+Jupyter for prompt engineering and threshold tuning — keeps experiments out of production code
+
+1.3 search_service.py Code Review
+Your working demo is solid. Three specific improvements to carry forward into the production version:
+
+Issue 1 — .env parsing: You are manually parsing .env. Use python-dotenv instead. Call load_dotenv() at app startup in config.py and never parse .env files in individual services.
+
+Issue 2 — Hardcoded fields list: The 'f' array ['patent_id','patent_title','patent_abstract','patent_type'] should live in config.py as PATENT_FIELDS so all services agree on the schema.
+
+Issue 3 — No pagination: PatentsView returns max 1000 results per page. Add an 'o' offset parameter and loop until results < page_size to ensure full recall.
+
+
+2. Implementation Phases
+Implement in strict phase order. Each phase produces a working, testable artifact before moving on.
+
+Phase 1 — Foundation (Days 1–2)
+
+Step 1: Environment & Config
+Everything flows from config.py. Build it first.
+
+# app/config.py
+from pydantic_settings import BaseSettings
+class Settings(BaseSettings):
+    patentsview_api_key: str
+    anthropic_api_key: str
+    mistral_model: str = 'mistral-7b-instruct'
+    embedding_model: str = 'BAAI/bge-large-en-v1.5'
+    bm25_weight: float = 0.4
+    cosine_weight: float = 0.6
+    top_k_results: int = 20
+    patent_fields: list = ['patent_id','patent_title','patent_abstract','patent_type','patent_date']
+    class Config: env_file = '.env'
+settings = Settings()
+
+Step 2: Pydantic Schemas
+Define your data contracts in models/schemas.py before implementing any service. This forces clarity on what each stage produces and consumes.
+
+# models/schemas.py
+from pydantic import BaseModel
+from typing import Optional
+class PatentRecord(BaseModel):
+    patent_id: str
+    patent_title: str
+    patent_abstract: Optional[str] = None
+    patent_type: Optional[str] = None
+    patent_date: Optional[str] = None
+
+class RankedPatent(BaseModel):
+    patent: PatentRecord
+    cosine_score: float
+    bm25_score: float
+    hybrid_score: float
+
+class PipelineResult(BaseModel):
+    query: str
+    expanded_queries: list[str]
+    ranked_patents: list[RankedPatent]
+    comparison_summary: str
+    report_markdown: str
+
+Step 3: Logger
+Set up utils/logger.py with structured logging (use structlog or Python's logging with JSON formatter). Every service should log at DEBUG for individual records and INFO for stage summaries.
+
+Phase 2 — Data Layer (Days 3–4)
+
+Step 4: Upgrade search_service.py
+Take your working demo and add three things: pagination, python-dotenv integration, and return of PatentRecord objects instead of raw dicts.
+
+# services/search_service.py (key additions)
+from app.config import settings
+from models.schemas import PatentRecord
+
+def fetch_all_patents(query_terms: list[str]) -> list[PatentRecord]:
+    all_patents = []
+    for term in query_terms:
+        offset = 0
+        while True:
+            batch = _fetch_page(term, offset)
+            all_patents.extend(batch)
+            if len(batch) < 1000: break
+            offset += 1000
+    return all_patents
+
+Step 5: Deduplication Service
+After search, deduplicate on patent_id. This is essential because query expansion will generate multiple queries that return overlapping results.
+
+# services/dedup_service.py
+def deduplicate(patents: list[PatentRecord]) -> list[PatentRecord]:
+    seen = {}
+    for p in patents:
+        if p.patent_id not in seen:
+            seen[p.patent_id] = p
+    return list(seen.values())
+
+Step 6: Storage Layer
+Implement storage/patent_repository.py with SQLite initially. Use SQLAlchemy Core (not ORM) for simplicity. Cache raw API responses in data/raw/ as JSON files named by query hash — this allows full re-runs without hitting the API.
+
+Phase 3 — Model Wrappers (Days 5–6)
+
+Step 7: Mistral Client
+Wrap Mistral via Ollama locally or via Mistral AI's API. The wrapper should only do one thing: call the model and return a string. No prompt logic here.
+
+# models/mistral_client.py
+import ollama
+class MistralClient:
+    def __init__(self, model: str = 'mistral'):
+        self.model = model
+    def generate(self, prompt: str) -> str:
+        response = ollama.generate(model=self.model, prompt=prompt)
+        return response['response'].strip()
+
+Step 8: Embedding Model
+Use sentence-transformers to load BGE-large-en-v1.5 locally. Wrap it to always return normalized numpy arrays. Add a batch method for efficiency — embedding one patent at a time is 10x slower than batching.
+
+# models/embedding_model.py
+from sentence_transformers import SentenceTransformer
+import numpy as np
+class EmbeddingModel:
+    def __init__(self, model_name: str = 'BAAI/bge-large-en-v1.5'):
+        self.model = SentenceTransformer(model_name)
+    def embed(self, texts: list[str]) -> np.ndarray:
+        return self.model.encode(texts, normalize_embeddings=True, batch_size=32)
+
+Step 9: Claude Client
+Wrap the Anthropic SDK. Expose two methods: compare() and generate_report(). Store max_tokens and model in config.
+
+# models/claude_client.py
+import anthropic
+class ClaudeClient:
+    def __init__(self):
+        self.client = anthropic.Anthropic()
+        self.model = 'claude-3-5-sonnet-20241022'
+    def complete(self, system: str, user: str, max_tokens: int = 4096) -> str:
+        msg = self.client.messages.create(
+            model=self.model, max_tokens=max_tokens,
+            system=system,
+            messages=[{'role': 'user', 'content': user}]
+        )
+        return msg.content[0].text
+
+
+Phase 4 — Services (Days 7–10)
+
+Step 10: Query Expansion Service
+Load your prompt from prompts/query_expansion.txt. The prompt should instruct Mistral to return a JSON array of alternative search terms. Parse the response and fall back to the original query on failure.
+
+# services/query_expansion.py
+import json
+PROMPT_TEMPLATE = open('prompts/query_expansion.txt').read()
+
+def expand_query(query: str, client: MistralClient) -> list[str]:
+    prompt = PROMPT_TEMPLATE.format(query=query)
+    raw = client.generate(prompt)
+    try:
+        terms = json.loads(raw)
+        return [query] + [t for t in terms if isinstance(t, str)]
+    except json.JSONDecodeError:
+        logger.warning('Query expansion parse failed, using original')
+        return [query]
+
+prompts/query_expansion.txt should read something like:
+
+You are a patent search expert. Given the search query below, generate 5 alternative technical search terms that would help find related patents. Consider synonyms, broader/narrower concepts, and different technical formulations. Return ONLY a JSON array of strings, no explanation.  Query: {query}
+
+Step 11: Embedding & Retrieval Services
+embedding_service.py takes a list of PatentRecords, concatenates title + abstract for each, and stores embeddings in the vector store. similarity.py computes cosine similarity between the query embedding and all patent embeddings as a vectorized numpy operation — do not loop.
+
+# retrieval/similarity.py
+import numpy as np
+def cosine_similarity_matrix(query_vec: np.ndarray, doc_vecs: np.ndarray) -> np.ndarray:
+    # Both inputs must already be L2-normalized
+    return doc_vecs @ query_vec  # shape: (n_docs,)
+
+Step 12: BM25 Ranker
+Use the rank-bm25 library. Build the index from patent text at search time (or cache it). BM25 operates on tokenized text — use a simple whitespace tokenizer initially, upgrade to a patent-specific tokenizer later.
+
+# retrieval/bm25_ranker.py
+from rank_bm25 import BM25Okapi
+def build_index(patents: list[PatentRecord]) -> BM25Okapi:
+    corpus = [(p.patent_title + ' ' + (p.patent_abstract or '')).split()
+              for p in patents]
+    return BM25Okapi(corpus)
+
+def get_scores(index: BM25Okapi, query: str) -> list[float]:
+    return index.get_scores(query.split())
+
+Step 13: Hybrid Ranking Service
+Normalize both score arrays to [0,1] using min-max normalization before combining. Raw BM25 scores and cosine scores are on different scales — combining without normalization will make one dominate.
+
+# services/ranking_service.py
+import numpy as np
+from app.config import settings
+
+def normalize(scores: np.ndarray) -> np.ndarray:
+    mn, mx = scores.min(), scores.max()
+    return (scores - mn) / (mx - mn + 1e-9)
+
+def hybrid_rank(cosine: np.ndarray, bm25: np.ndarray) -> np.ndarray:
+    c = normalize(cosine)
+    b = normalize(bm25)
+    return settings.cosine_weight * c + settings.bm25_weight * b
+
+Phase 5 — LLM Analysis (Days 11–13)
+
+Step 14: Comparison Service
+Pass the top 10 ranked patents (title + abstract + patent_id) to Claude with a structured prompt requesting JSON output. Prompt lives in prompts/comparison.txt.
+
+# services/comparison_service.py
+def compare_patents(query: str, patents: list[RankedPatent], client: ClaudeClient) -> str:
+    patent_text = format_patents_for_prompt(patents[:10])
+    system = open('prompts/comparison_system.txt').read()
+    user = f'Query: {query}\n\nPatents:\n{patent_text}'
+    return client.complete(system=system, user=user)
+
+The comparison prompt should request structured output with fields: patent_id, overlap_level (high/medium/low), key_overlapping_claims, differentiation_notes.
+
+Step 15: Report Service
+Pass the comparison JSON to Claude with a report generation prompt. Request Markdown output with sections: Executive Summary, Detailed Claim Analysis, Risk Assessment, Recommended Actions. Save the Markdown to data/processed/.
+
+Phase 6 — Orchestration (Days 14–15)
+
+Step 16: Pipeline Assembly
+Assemble all services in orchestrator/patent_pipeline.py. The pipeline should be a plain Python function, not a class. Each stage should log its input count and output count so you can monitor where the funnel narrows.
+
+# orchestrator/patent_pipeline.py
+def run_pipeline(query: str) -> PipelineResult:
+    logger.info(f'Pipeline start: {query}')
+    # 1. Expand
+    queries = query_expansion.expand_query(query, mistral)
+    # 2. Search
+    raw_patents = search_service.fetch_all_patents(queries)
+    # 3. Deduplicate
+    patents = dedup_service.deduplicate(raw_patents)
+    logger.info(f'{len(patents)} unique patents after dedup')
+    # 4. Embed
+    vecs = embedding_service.embed_patents(patents)
+    # 5. Rank
+    ranked = ranking_service.rank(query, patents, vecs)
+    # 6. Compare
+    comparison = comparison_service.compare_patents(query, ranked, claude)
+    # 7. Report
+    report = report_service.generate(query, ranked, comparison, claude)
+    return PipelineResult(...)
+
+
+3. Testing Strategy
+
+Test File
+What to Test
+test_search.py
+Mock requests.post. Verify pagination loop fires when batch=1000. Verify dedup removes duplicates with same patent_id.
+test_ranking.py
+Feed known cosine + BM25 scores, assert hybrid output matches expected. Test normalization edge cases (all same score).
+test_pipeline.py
+Use fixture responses for all API calls. Run full pipeline end-to-end with mocked Mistral and Claude. Assert PipelineResult schema validates.
+test_embedding.py
+Assert output shape is (n, 1024) for BGE-large. Assert vectors are unit normalized (norm ≈ 1.0).
+
+Use pytest-vcr or responses library to record/replay real API calls. This lets your test suite run offline in CI without consuming API credits.
+
+
+4. requirements.txt
+
+# API & HTTP
+requests>=2.31
+fastapi>=0.110
+uvicorn>=0.28
+python-dotenv>=1.0
+pydantic>=2.6
+pydantic-settings>=2.2
+
+# LLM & Embeddings
+anthropic>=0.25
+sentence-transformers>=2.7
+ollama>=0.2
+
+# Retrieval
+rank-bm25>=0.2.2
+numpy>=1.26
+faiss-cpu>=1.8
+
+# Storage
+sqlalchemy>=2.0
+
+# Testing
+pytest>=8.1
+pytest-mock>=3.14
+responses>=0.25
+
+
+5. Security Notes
+
+IMPORTANT: Your provided API key (DSSVf6t3.AhJnfJBoDf6kiswrtsdnN9ECVvKiINBH) has been included in this document for reference but should be rotated immediately if this document is shared. Never commit API keys to git — use .env which is listed in .gitignore.
+
+    • Add .env and data/ to .gitignore before first commit
+    • Use environment variables in CI/CD — never hardcode keys even in test configs
+    • Rate-limit your PatentsView calls to stay within their fair use policy
+    • Claude API costs scale with token volume — set max_tokens limits in config and monitor usage
+
+
+6. Implementation Roadmap
+
+Phase
+Deliverable & Acceptance Criteria
+Phase 1: Foundation (Days 1–2)
+config.py loads from .env without error. schemas.py validates a sample PatentRecord. Logger outputs JSON to console.
+Phase 2: Data Layer (Days 3–4)
+search_service fetches >1000 results via pagination. dedup_service reduces duplicate rate to 0. Repository saves/loads patent records.
+Phase 3: Model Wrappers (Days 5–6)
+MistralClient returns string for any prompt. EmbeddingModel returns (n,1024) normalized array. ClaudeClient returns string for system+user prompt.
+Phase 4: Services (Days 7–10)
+expand_query returns 5+ alternative terms. Hybrid ranking changes top-10 vs. cosine-only baseline. All services have unit tests passing.
+Phase 5: LLM Analysis (Days 11–13)
+Comparison returns valid structured JSON. Report generates Markdown with all 4 required sections. End-to-end run completes for a real query.
+Phase 6: Polish (Days 14–15)
+CLI in main.py accepts query arg. FastAPI /search endpoint returns PipelineResult. All tests pass. README documents usage.
+
+
+Patent Intelligence — Implementation Guide v1.0

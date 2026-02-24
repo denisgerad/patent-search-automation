@@ -1,0 +1,25 @@
+{
+  "error": false,
+  "count": 3,
+  "total_hits": 8,
+  "patents": [
+    {
+      "patent_id": "11000006",
+      "patent_title": "Reinforcement learning agent for robotic manipulation",
+      "patent_abstract": "A deep reinforcement learning framework training robotic arms to perform dexterous manipulation tasks using proximal policy optimisation.",
+      "patent_type": "utility"
+    },
+    {
+      "patent_id": "11000007",
+      "patent_title": "Convolutional neural network for medical image segmentation",
+      "patent_abstract": "A U-Net based architecture for pixel-wise semantic segmentation of CT and MRI scans used in clinical decision support systems.",
+      "patent_type": "utility"
+    },
+    {
+      "patent_id": "11000008",
+      "patent_title": "Anomaly detection using autoencoder neural networks",
+      "patent_abstract": "An unsupervised method for detecting outliers in time-series sensor data by training an autoencoder to reconstruct normal operating patterns.",
+      "patent_type": "utility"
+    }
+  ]
+}

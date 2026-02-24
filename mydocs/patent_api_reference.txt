@@ -1,0 +1,269 @@
+PatentSearch API Reference
+Introduction
+The PatentsView PatentSearch API is intended to inspire the exploration and enhanced understanding of US intellectual property (IP) and innovation systems. The database driving the API is regularly updated and integrates the best available tools for inventor disambiguation and data quality control. We hope researchers and developers alike will explore the API to discover people and companies and to visualize trends and patterns across the US innovation landscape.
+
+tip
+Throughout this document, whenever the {} syntax is used, users are expected to replace it with valid values.
+
+Authentication
+API Keys
+The PatentSearch API uses API Keys to authenticate requests but there are no specific authorization enforced. i.e. if you have an API Key you can access all publicly available endpoints.
+
+All API requests must include the header X-Api-Key: {your_key}
+
+info
+Currently, the API Keys do not expire but this may change in the future. If this changes, we will update the documentation here as well as communicate changes with the users via the patentsview website and the mailing list.
+
+tip
+If users previously used a browser to run API queries, due to the API key enforcement users will not be able use the same workflow. Alternatively either a standalone applications (such as Postman) or browser extension (such as RESTED in Firefox/Chrome) can be used to send one-off queries.
+
+Usage Limits
+Each API Key is allowed 45 requests/minute. If you exceed this limit, your API requests will fail. See HTTP Response Code for more details
+
+Request an API Key
+We have temporarily suspended new API Key grants. Please monitor this page for updates. Each user is allowed only one API Key. If you lose your API key, please request a new one with same email address and name.
+
+warning
+Please do not request/use multiple keys at the same time. If you do, your access may be revoked.
+
+API Request
+Structure of Request
+An API request is made of 4 components:
+
+API Key - your authentication token (see Authentication)
+Endpoint – the specific API URL you are calling (See Endpoints Dictionary)
+Request Method – either GET or POST
+Request Parameters – the data you use to filter, sort, and paginate your results
+Request Method
+All PatentSearch API endpoints support two methods: GET and POST. Both GET and POST use/require the same set of parameters.
+
+info
+The PatentsView PatentSearch API endpoints don't allow users to submit data to our databases. The POST method is another mechanism for posting query parameters - it is used only to send query parameters; it does not add or update records in our database.
+
+Request Parameters
+There are 4 parameters that can be provided in a request. Each of the components is fully specified in the API Query Language section. Briefly:
+
+Query String(q) - used to filter data
+Field list (f) - used to specify fields to return
+Sorting (s) - used to specify ordering
+Options (o) - used to specify additional options and pagination
+Defaults
+Each API endpoint is configured with appropriate defaults for the f, s and o parameters. When a user does not include one or more these parameters, the defaults will be used.
+
+Default behaviors:
+
+The q parameter is required; you must include it in every request.
+By default, the API will return 100 records. You can increase this up to 1,000 records—see Options (o) section.
+Results are sorted by the endpoint’s ID field in ascending order. E.g. patent_id is the default sort field for /patent endpoint. The full list of default sort fields can be found in the Endpoints Dictionary below.
+API Response
+HTTP Response Codes
+The API returns standard HTTP status codes to indicate the result of your request. Here’s what each code means and how you can resolve common issues:
+
+Response Code	Description	Potential Resolution
+200	Request Successfully Completed	
+400	Request Invalid	Review X-Status-Reason and X-Status-Reason-Code response headers for more details
+403	Forbidden	Verify that your API key is correctly entered and provided in your request headers with the key X-Api-Key
+404	Resource not found	Verify the endpoint URL is correct. If using "GET" resource locator, verify the supplied ID is valid
+429	Too many requests	Your application has exceeded the usage limits. Use Retry-After response header to identify wait duration before making the next request
+500	Server Error	This is typically an error on our servers.
+Response Structure
+Every API response will have the following structure:
+
+error: a boolean flag indicating if the request succeeded or failed
+count: total number of records returned in this response
+total_hits: total number of records that matched the current query
+...: The final and the main data component on the response will be based on the endpoint used. (See individual Endpoints for their respective response keys)
+Sample Response
+
+Below is a simplified example of a typical API response:
+
+{
+  "error": "boolean",
+  "count": "integer",
+  "total_hits": "integer",
+  ...
+}
+
+API Query Language
+Query String (q)
+Query String Format
+The query string is always a single JSON object: {}, with properties and contained objects that determine the criteria for the query.
+
+tip
+Note: To aid in understanding the structure of the queries below and while creating your own, it is helpful to use JSON validators and visual parsers, like http://www.jsoneditoronline.org/ and http://jsonlint.com/.
+
+Syntax
+q={criterion}
+criterion
+    pair
+    "_eq" : {simple_pair}
+    "_neq" : {simple_pair}
+    "_gt" : {simple_pair}
+    "_gte" : {simple_pair}
+    "_lt" : {simple_pair}
+    "_lte" : {simple_pair}
+    "_begins" : {simple_pair}
+    "_contains" : {simple_pair}
+    "_text_all" : {simple_pair}
+    "_text_any" : {simple_pair}
+    "_text_phrase" : {simple_pair}
+    "_not" : {criterion}
+    "_and" : [{criterion}, ...]
+    "_or" : [{criterion}, ...]
+pair
+    simple_pair
+    "field" : [value, ...]
+simple_pair
+    "field" : value
+
+tip
+When working with text data fields, wherever possible, we recommend using _text* operators over the _contains and _begins operator. The text operators treat these fields as full text data and hence are more performant. The "full text" fields are identified in the API Endpoint specification with the value "text" for the data type.
+
+Single Criterion (Equals operator)
+The basic criterion, which checks for equality, has the format: {<field>:<value>}, where <field> is the name of a database field and <value> is the value the field will be compared to for equality (Each API Endpoint section contains a list of the data fields that can be selected for inclusion in output datasets)
+
+For example, this query string will return the patent with the patent number of 7861317:
+
+https://search.patentsview.org/api/v1/patent/?q={"patent_id":"7861317"}
+
+Comparison Operators
+Comparison operators can be used to compare a field to a value using comparators other than equality. The available comparison operators are:
+
+Operator	Description	Applies to
+_eq	Equal to	Numbers, dates, strings
+_neq	Not equal to	Numbers, dates, strings
+_gt	Greater than	Numbers, dates
+_gte	Greater than or equal to	Numbers, dates
+_lt	Less than	Numbers, dates
+_lte	Less than or equal to	Numbers, dates
+_begins	String begins with value	Strings
+_contains	String contains value	Strings
+_text_all	Text contains all specified words	Full text fields
+_text_any	Text contains any of the specified words	Full text fields
+_text_phrase	Text contains the exact phrase	Full text fields
+To specify a comparison operator for a criterion, nest the element containing the criterion inside an element that uses the comparison operator.
+
+For example, this query string will return all patents that have a grant date on or after January 9, 2007:
+
+https://search.patentsview.org/api/v1/patent/?q={"_gte":{"patent_date":"2007-01-09"}}
+
+tip
+The query string q={"_eq":{"patent_date":"2007-01-09"}} is functionally equivalent to q={"patent_date":"2007-01-09"}
+
+Negation
+Negation does the opposite of the specified comparison. To specify the negation operator for a criterion, nest the element containing the criterion inside an element that uses the negation operator: _not.
+
+For example, this query string will return all patents that are not design patents:
+
+https://search.patentsview.org/api/v1/patent/?q={"_not":{"patent_type":"design"}}
+
+Value Arrays
+If the value of a criterion is an array, then the query will accept a match of any one of the array values.
+
+For example, this query will return all patents that have "Whitney" or "Hopper" as an inventor:
+
+https://search.patentsview.org/api/v1/patent/?q={"inventors.inventor_name_last":["Whitney","Hopper"]}
+
+
+Join (Conjunction) Operators
+Multiple criteria can be added to a query using a join operator (_and, _or) and putting the criteria in an array using square brackets ("[" and "]").
+
+The following has multiple criteria, and will return patents that have "Whitney" as an inventor and a grant date of October 6, 1981:
+
+https://search.patentsview.org/api/v1/patent/?q={"_and":[{"inventors.inventor_name_last":"Whitney"},{"patent_date":"1981-10-06"}]}
+
+
+Complex Combinations
+These elements, criteria, arrays, and operators can be combined to define robust queries. A few examples:
+
+Patents with a grant date in 2007:
+
+https://search.patentsview.org/api/v1/patent/?q={"_and":[{"_gte":{"patent_date":"2007-01-01"}},
+{"_lte":{"patent_date":"2007-12-31"}}]}
+
+
+Patents with an inventor with the last name of "Whitney" or "Hopper" and not a design patent and with a grant date in 2007:
+
+https://search.patentsview.org/api/v1/patent/?q={"_and":[{"inventors.inventor_name_last":["Whitney","Hopper"]},
+{"_not":{"patent_type":"design"}},
+{"_gte":{"patent_date":"2007-01-01"}},
+{"_lte":{"patent_date":"2007-12-31"}}]}
+
+
+Patents with an inventor with the last name of "Whitney" or "Hopper" or with a title that contains "cotton" or "gin" or "COBOL":
+
+https://search.patentsview.org/api/v1/patent/?q={"_or":[{"inventors.inventor_name_last":["Whitney","Hopper"]},
+{"_text_any":{"patent_title":"COBOL cotton gin"}}]}
+
+
+Patents with an inventor with the last name of "Whitener" and with "cotton gin" in the title, or with an inventor with the last name of "Heath" and with "COBOL" in the title:
+
+https://search.patentsview.org/api/v1/patent/?q={"_or":[{"_and":[{"inventors.inventor_name_last":"Whitener"},{"_text_phrase":{"patent_title":"cotton gin"}}]},
+{"_and":[{"inventors.inventor_name_last":"Heath"},{"_text_all":{"patent_title":"COBOL"}}]}]}
+
+
+Formats
+Dates are expected to be in ISO 8601 date format: YYYY-MM-DD.
+Nested fields follow the format <field>.<nested_field>
+
+Field List (f)
+Field List Format
+The field list parameter is a JSON array of the names of the fields to be returned by the query. If not provided, the API will return a default set of fields. Each API Endpoint section contains a list of the data fields that can be selected for inclusion in output datasets. The following example would return the patent numbers, inventor names, and date patent was granted that meet the query criteria:
+
+f=["patent_id","inventors.inventor_name_last","patent_date"]
+
+tip
+Note that the Nested fields have the format {entity}.{field_name}. In the endpoint specification below, these fields are shown in a containers within the parent endpoint.
+
+Sorting (s)
+Sort Parameter Format
+The sort parameter is a JSON formatted array of objects that specifies the sort order for the returned results. If empty or not provided, the default sort order will be ascending by the endpoint's primary field or fields. These default sort fields are specified in the Endpoints Section below. Each object in the array should be a pair, with the pair's key being one of the endpoint fields, and the value is either asc or desc, to indicate ascending or descending sort, respectively.
+
+Examples:
+
+Sort patents so that those with the most citations by other US patents appear first. Primary sort is by patent_num_times_cited_by_us_patents in descending order, so that patents with the most citations by other US patents will be first, and those with the fewest citations by other US patents will be last.
+s=[{"patent_num_times_cited_by_us_patents":"desc"}]
+
+Primary sort is by patent_date in descending order, secondarily by patent_id in ascending order.
+s=[{"patent_date":"desc"},{"patent_id":"asc"}]
+
+Primary sort is by citation_sequence in ascending order, so that citations are returned in the ordered they were cited.
+s=[{"citation_sequence":"desc"}]
+
+Primary sort is by citation_date in descending order, secondarily by patent_id in ascending order.
+s=[{"citation_date":"desc"},{"patent_id":"asc"}]
+
+Options (o)
+The options parameter is a JSON formatted object of options to modify the query results. All options keywords are optional. Available options are:
+
+Search Options
+exclude_withdrawn
+
+The exclude_withdrawn option is only used by the Patent endpoint and determines whether information for withdrawn patents will be excluded from the results. It defaults to true. If the query includes the condition {"withdrawn": true}, this option will be ignored. This option is ignored by all other endpoints.
+
+pad_patent_id
+
+The pad_patent_id option is used in endpoints that include patent_id as a valid field. It determines whether the API will pad the patent_id field to a standard length of 8 characters by left-appending 0s to the numeric portion of the ID. It defaults to false. This transformation applies both to how patent_id is presented in the response as well as how it is interpreted by the query, sort order, and pagination options.
+
+info
+As an example, with pad_patent_id set to true, the patent_id's "7245826" and "PP3990" will be treated and displayed as "07245826" and "PP003990", respectively.
+
+The padded form used when pad_patent_id is set to true provides a more natural and intuitive sorting and filtering behavior for patents that have different numbers of nonzero digits. For example, with pad_patent_id set to true, a range query or sort based on patent_id will treat patent "D0999999" as before/lower than patent "D1000000" instead of treating patent "D1000000" as before/lower than patent "D999999".
+
+The un-padded form used when pad_patent_id is set to false or omitted matches the patent_id as displayed in other PatentsView data products such as the bulk data download tables.
+
+Pagnation Options
+size
+
+The size option specifies the number of results per page; it defaults to 100 and has a maximum of 1,000. Values greater than 1,000 will be treated as 1,000.
+
+after
+
+The after option implements Cursor Pagination. If included, the value should be a valid value (or list of values) from the field(s) specified in the sort option. To get continuous pages of results, users will need to supply the value(s) from the last record in the previous query to the subsequent query. The number and order of values provided should match the number and order of fields used in the Sort parameter.
+
+info
+As an example, if the Sort parameter is s=[{"patent_id":"asc"}], the Option parameter for your first query might look like o={"size":100}. This would return the first 100 records sorted by patent id in ascending order.
+
+The Option parameter for the second query might look like o={"size":100, "after":"11191202"} where "11191202" is the last patent_id value from the previous query. This would return the next 100 records.
+
+If the Sort parameter were s=[{"patent_id":"asc"},{"claim_sequence":"desc"}], the second query would have an Option parameter that would look like 0={"size":100, "after":["12050006",2]}, where "12050006" is the patent_id from the last record of the previous query, and 2 is the claim_sequence value from the last record of the previous query. This would return the next 100 records; in this case, the next record would be the one where patent_id = "12050006" and claim_sequence = 1.

@@ -1,0 +1,31 @@
+{
+  "error": false,
+  "count": 4,
+  "total_hits": 4,
+  "patents": [
+    {
+      "patent_id": "11000001",
+      "patent_title": "Machine learning model compression using knowledge distillation",
+      "patent_abstract": "A method for compressing deep neural network models by transferring knowledge from a large teacher network to a smaller student network.",
+      "patent_type": "utility"
+    },
+    {
+      "patent_id": "11000002",
+      "patent_title": "Federated learning system for distributed model training",
+      "patent_abstract": "A system enabling multiple edge devices to collaboratively train a shared neural network model without sharing raw data.",
+      "patent_type": "utility"
+    },
+    {
+      "patent_id": "11000001",
+      "patent_title": "Machine learning model compression using knowledge distillation",
+      "patent_abstract": "A method for compressing deep neural network models by transferring knowledge from a large teacher network to a smaller student network.",
+      "patent_type": "utility"
+    },
+    {
+      "patent_id": "11000002",
+      "patent_title": "Federated learning system for distributed model training",
+      "patent_abstract": "A system enabling multiple edge devices to collaboratively train a shared neural network model without sharing raw data.",
+      "patent_type": "utility"
+    }
+  ]
+}

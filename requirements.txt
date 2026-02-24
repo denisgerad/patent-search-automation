@@ -1,0 +1,44 @@
+# Core HTTP & Environment
+requests>=2.31
+python-dotenv>=1.0
+
+# Configuration
+pydantic>=2.6
+pydantic-settings>=2.2          # BaseSettings for app/config.py
+
+# Data Handling
+numpy>=1.26
+pandas>=2.2.0                   # data analysis utilities
+scikit-learn>=1.4.0             # normalisation helpers for ranking
+
+# Embeddings & Vector Search
+sentence-transformers>=2.7
+torch>=2.2.0                    # required by sentence-transformers
+faiss-cpu>=1.8
+
+# Ranking
+rank-bm25>=0.2.2
+
+# LLM Clients
+anthropic>=0.25                 # Claude
+ollama>=0.2                     # local Mistral via Ollama
+openai>=1.12.0                  # optional GPT support
+
+# Storage
+sqlalchemy>=2.0                 # SQLite / Postgres repository layer
+
+# API Layer (future SaaS exposure)
+fastapi>=0.110
+uvicorn>=0.28
+
+# Async Support (future scaling)
+httpx>=0.27.0
+aiohttp>=3.9.0
+
+# Logging & Utilities
+loguru>=0.7.2
+
+# Testing
+pytest>=8.1
+pytest-mock>=3.14               # mock patching helpers
+responses>=0.25                 # HTTP request mocking for offline tests

@@ -2,51 +2,115 @@
 app/config.py
 
 Central configuration for the patent-search application.
-
-This is the single source of truth for all runtime settings.
-It lives in app/ alongside the FastAPI entrypoint (main.py, api.py).
+Uses pydantic-settings so every value is type-validated and sourced from .env
+automatically — no manual os.getenv() calls needed in service files.
 
 Usage in any service or module:
-    from app.config import PATENT_FIELDS, MAX_RESULTS, ...
+    from app.config import settings
+    api_key = settings.patentsview_api_key
+    top_k   = settings.top_k_results
 
-load_dotenv() is called once here at import time.  Every subsequent
-os.getenv() call anywhere in the codebase will see the values from .env
-without any module needing to parse the file itself.
+Optional operational limits (pagination caps) are plain module constants
+defined below the Settings class — set to None to disable.
 """
 
-import os
 from pathlib import Path
-from dotenv import load_dotenv
+from typing import Optional
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# .env lives at the project root, one level above this file (app/)
-_env_path = Path(__file__).resolve().parents[1] / ".env"
-load_dotenv(dotenv_path=_env_path)
 
-# ------------------------------------------------------------------
-# PatentsView API
-# ------------------------------------------------------------------
+class Settings(BaseSettings):
+    """
+    All application settings loaded from the .env file at the project root.
 
-# Fields requested from the PatentsView API for every patent query.
-# Centralised here so all services agree on the schema without
-# repeating the list.
-PATENT_FIELDS = ["patent_id", "patent_title", "patent_abstract", "patent_type"]
+    Required fields (must be present in .env):
+        patentsview_api_key  — PatentsView API authentication key
 
-# Maximum results the API returns per request (hard API limit).
-# NOTE: PatentsView uses the key 'size' (not 'per_page') in the options object.
+    Optional fields (leave blank in .env to use the default):
+        anthropic_api_key    — Anthropic Claude API key (needed for comparison + report)
+        mistral_model        — Ollama model tag for query expansion
+        embedding_model      — HuggingFace model ID for BGE embeddings
+        bm25_weight          — Weight for BM25 scores in hybrid ranking (0–1)
+        cosine_weight        — Weight for cosine scores in hybrid ranking (0–1)
+        top_k_results        — Number of top patents returned to the LLM analysis stage
+        patent_fields        — Comma-separated list of PatentsView fields to request
+    """
+
+    model_config = SettingsConfigDict(
+        # .env is one level above this file (app/)
+        env_file=str(Path(__file__).resolve().parents[1] / ".env"),
+        env_file_encoding="utf-8",
+        # Extra fields in .env are silently ignored
+        extra="ignore",
+    )
+
+    # ------------------------------------------------------------------
+    # API keys — read from .env
+    # ------------------------------------------------------------------
+    patentsview_api_key: str
+    anthropic_api_key: Optional[str] = None  # set when Claude analysis is enabled
+
+    # ------------------------------------------------------------------
+    # Model selection
+    # ------------------------------------------------------------------
+    mistral_model: str = "mistral"             # Ollama model tag; e.g. "mistral:7b-instruct"
+    embedding_model: str = "BAAI/bge-large-en-v1.5"  # sentence-transformers model ID
+
+    # ------------------------------------------------------------------
+    # Hybrid ranking weights (must sum to 1.0)
+    # ------------------------------------------------------------------
+    bm25_weight: float = 0.4
+    cosine_weight: float = 0.6
+
+    # ------------------------------------------------------------------
+    # Pipeline behaviour
+    # ------------------------------------------------------------------
+    top_k_results: int = 20   # patents forwarded to LLM comparison stage
+
+    # SQLAlchemy database URL. Defaults to a SQLite file inside data/.
+    db_url: str = "sqlite:///" + str(
+        Path(__file__).resolve().parents[1] / "data" / "patents.db"
+    )
+
+    # PatentsView fields requested on every query.
+    # Stored as a list; pydantic-settings reads comma-separated values from .env.
+    # Includes patent_date for temporal analysis.
+    patent_fields: list[str] = [
+        "patent_id",
+        "patent_title",
+        "patent_abstract",
+        "patent_type",
+        "patent_date",
+    ]
+
+    @field_validator("bm25_weight", "cosine_weight")
+    @classmethod
+    def _weight_range(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError("Ranking weights must be between 0.0 and 1.0")
+        return v
+
+
+# ---------------------------------------------------------------------------
+# Module-level singleton — import this everywhere
+# ---------------------------------------------------------------------------
+settings = Settings()
+
+# ---------------------------------------------------------------------------
+# Operational constants — not environment-driven, but centralised here so
+# all services agree on the same values.
+# ---------------------------------------------------------------------------
+
+# Hard API limit: PatentsView returns at most this many records per request.
+# Uses the 'size' key in the options object (not 'per_page').
 PATENT_PAGE_SIZE = 1000
 
-# ------------------------------------------------------------------
-# Result limits — change these two values to control how much data
-# fetch_patents_by_keywords() retrieves before stopping.
-# ------------------------------------------------------------------
-
-# Maximum total number of patent documents to return across all pages.
-# The user will be notified when this cap is reached.
+# Maximum total patent documents to return across all pages.
+# The user is notified when this cap is reached.
 # Set to None to disable the document cap.
-MAX_RESULTS = 5          # ← change this number to allow more documents
+MAX_RESULTS = 5          # ← change to allow more documents
 
-# Maximum number of API pages (requests) to fetch per query.
-# Each page holds up to PATENT_PAGE_SIZE records.
-# The user will be notified when this cap is reached.
+# Maximum number of API pages (requests) per query.
 # Set to None to disable the page cap.
-MAX_PAGES = 10           # ← change this number to allow more pages
+MAX_PAGES = 10           # ← change to allow more pages

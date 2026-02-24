@@ -60,8 +60,8 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Hybrid ranking weights (must sum to 1.0)
     # ------------------------------------------------------------------
-    bm25_weight: float = 0.4
-    cosine_weight: float = 0.6
+    bm25_weight: float = 0.3    # 0.7/0.3 split: semantic similarity matters more for patents
+    cosine_weight: float = 0.7  # tune via .env: bm25_weight=... / cosine_weight=...
 
     # ------------------------------------------------------------------
     # Pipeline behaviour

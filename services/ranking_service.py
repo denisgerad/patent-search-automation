@@ -4,13 +4,18 @@ services/ranking_service.py
 Combines cosine-similarity scores and BM25 scores into a single hybrid
 ranking for each patent, then returns a sorted list of RankedPatent objects.
 
-Algorithm
----------
-1. Normalise both score arrays to [0, 1] with min-max normalisation.
-   (A small epsilon prevents division-by-zero when all scores are equal.)
-2. Compute hybrid = cosine_weight * cosine_norm + bm25_weight * bm25_norm.
-   Weights are pulled from app.config.settings.
-3. Sort descending and return the top-k results as RankedPatent objects.
+Algorithm (clean / mathematically sound)
+-----------------------------------------
+1. Cosine similarity is already in [0, 1] for L2-normalised vectors — use raw.
+   Do NOT re-normalise cosine relative to the batch; that would distort the
+   absolute similarity signal (e.g. a batch where all patents score 0.45–0.50
+   would be stretched to 0–1, making weak matches look strong).
+2. BM25 is unbounded — normalise to [0, 1] with per-batch min-max scaling.
+3. Hybrid = cosine_weight * cosine + bm25_weight * bm25_norm.
+   Default weights: 0.7 cosine + 0.3 BM25 (semantic > keyword for patents).
+   Weights live in app.config.settings and can be tuned via .env.
+4. Sort descending, return the top-k results as RankedPatent objects.
+   cosine_score and bm25_score on each RankedPatent are both in [0, 1].
 """
 import logging
 
@@ -44,19 +49,24 @@ def hybrid_rank(
     bm25_scores: np.ndarray,
 ) -> np.ndarray:
     """
-    Produce hybrid scores from two normalised score arrays.
+    Compute hybrid scores: raw cosine + normalised BM25.
 
-    Weights are read from ``settings.cosine_weight`` and
-    ``settings.bm25_weight`` (must sum to 1.0, but this is not enforced).
+    Cosine is used as-is (already in [0, 1] for unit-normalised vectors).
+    BM25 is min-max normalised to [0, 1] per batch before combining.
+
+    Weights are read from ``settings.cosine_weight`` (default 0.7) and
+    ``settings.bm25_weight`` (default 0.3).
 
     Args:
-        cosine_scores: Raw cosine similarity scores, shape (n,).
-        bm25_scores:   Raw BM25 scores, shape (n,).
+        cosine_scores: Raw cosine similarity scores, shape (n,).  Must be in [0, 1].
+        bm25_scores:   Raw BM25 scores, shape (n,).  Unbounded — normalised here.
 
     Returns:
         Hybrid score array, shape (n,), in [0, 1].
     """
-    c = normalize(cosine_scores)
+    # Cosine: use raw — do NOT normalise relative to batch.
+    c = cosine_scores
+    # BM25: unbounded → normalise to [0, 1].
     b = normalize(bm25_scores)
     return settings.cosine_weight * c + settings.bm25_weight * b
 
@@ -92,29 +102,28 @@ def rank(
         logger.warning("rank() called with no patents; returning empty list.")
         return []
 
-    # --- Cosine similarity ---
+    # --- Cosine similarity (raw, already in [0, 1]) ---
     cosine = cosine_similarity_matrix(query_vec, doc_vecs)
 
-    # --- BM25 ---
-    bm25_index = build_index(patents)
-    bm25 = get_scores(bm25_index, query)
+    # --- BM25 (raw, unbounded) ---
+    bm25_raw = np.array(get_scores(build_index(patents), query), dtype=float)
 
-    # --- Hybrid ---
-    hybrid = hybrid_rank(cosine, np.array(bm25, dtype=float))
+    # --- BM25 normalised to [0, 1] for both hybrid formula and display ---
+    bm25_norm = normalize(bm25_raw)
+
+    # --- Hybrid: raw cosine + normalised BM25 ---
+    hybrid = hybrid_rank(cosine, bm25_raw)   # hybrid_rank normalises BM25 internally
 
     # --- Sort and truncate ---
     sorted_idx = np.argsort(hybrid)[::-1][:k]
-
-    # Normalise BM25 to [0, 1] for consistent display alongside cosine scores.
-    bm25_norm = normalize(np.array(bm25, dtype=float))
 
     ranked: list[RankedPatent] = []
     for i in sorted_idx:
         ranked.append(
             RankedPatent(
                 patent=patents[i],
-                cosine_score=float(cosine[i]),
-                bm25_score=float(bm25_norm[i]),   # normalised to [0, 1]
+                cosine_score=float(cosine[i]),      # raw cosine in [0, 1]
+                bm25_score=float(bm25_norm[i]),     # normalised BM25 in [0, 1]
                 hybrid_score=float(hybrid[i]),
             )
         )

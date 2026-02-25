@@ -53,10 +53,11 @@ _DEFAULTS = {
     "stage": 0,          # 0=idle 1=expanded 2=searched 3=ranked 4=analysed
     "error": "",
     "elapsed": {},
-    "json_query": "",       # optional structured JSON query (raw text)
-    "json_boolean": "",      # generated Boolean string
-    "json_uspto_url": "",    # USPTO Full Text link
-    "json_result_count": None,  # PatentsView total_patent_count
+    "json_query": "",         # optional structured JSON query (raw text)
+    "json_boolean": "",        # generated Boolean string
+    "json_uspto_url": "",      # USPTO Full Text link
+    "json_result_count": None, # PatentsView total_patent_count
+    "json_groups": [],         # list[list[str]] — for badge matching
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -118,9 +119,30 @@ query = st.text_area(
 _JSON_PLACEHOLDER = (
     '{\n'
     '  "groups": [\n'
-    '    { "terms": ["autonomous vehicle", "self-driving vehicle"] },\n'
-    '    { "terms": ["lane detection", "lane recognition"] },\n'
-    '    { "terms": ["infrared sensor", "IR detector"] }\n'
+    '    {\n'
+    '      "terms": [\n'
+    '        "autonomous vehicle",\n'
+    '        "self-driving vehicle",\n'
+    '        "driverless vehicle",\n'
+    '        "autonomous driving system"\n'
+    '      ]\n'
+    '    },\n'
+    '    {\n'
+    '      "terms": [\n'
+    '        "lane detection",\n'
+    '        "lane recognition",\n'
+    '        "lane boundary detection",\n'
+    '        "road lane identification"\n'
+    '      ]\n'
+    '    },\n'
+    '    {\n'
+    '      "terms": [\n'
+    '        "infrared sensor",\n'
+    '        "IR detector",\n'
+    '        "infrared camera",\n'
+    '        "infrared camera based lane detection"\n'
+    '      ]\n'
+    '    }\n'
     '  ],\n'
     '  "combine_groups_with": "AND"\n'
     '}'
@@ -130,6 +152,15 @@ with st.expander("📋 JSON Format  *(optional — overrides Mistral expansion)*
     st.caption(
         "Paste a structured JSON query to bypass Mistral and use your own term groups. "
         "The **Technology query** above is still used for embedding-based ranking."
+    )
+    st.info(
+        "💡 **Tips for better precision:**\n"
+        "- Aim for **3–4 terms per group** — more synonyms = better recall without losing precision\n"
+        "- Add at least one **specific technical phrase** per group "
+        "(e.g. `\"infrared camera based lane detection\"` instead of just `\"infrared sensor\"`)\n"
+        "- Add a **constraint group** for key technology constraints "
+        "(e.g. `{\"terms\": [\"real-time processing\", \"embedded system\"]}` combined with AND)\n"
+        "- Multi-word terms are automatically quoted for phrase matching"
     )
     _json_raw = st.text_area(
         "json_query_area",
@@ -144,23 +175,30 @@ with st.expander("📋 JSON Format  *(optional — overrides Mistral expansion)*
     # Live validation
     if _json_raw.strip():
         try:
-            _parsed_json = json.loads(_json_raw)
-            if not isinstance(_parsed_json, dict) or "groups" not in _parsed_json:
-                raise ValueError('JSON must have a top-level "groups" key.')
-            _preview_terms: list[str] = []
-            for _g in _parsed_json["groups"]:
-                for _t in _g.get("terms", []):
-                    if str(_t).strip():
-                        _preview_terms.append(str(_t).strip())
-            if not _preview_terms:
-                raise ValueError("No terms found inside groups.")
-            _combine = _parsed_json.get("combine_groups_with", "AND").upper()
-            st.success(
-                f"✅ Valid — {len(_preview_terms)} terms across "
-                f"{len(_parsed_json['groups'])} groups "
-                f"(combined with **{_combine}**). Mistral expansion will be skipped."
+            from services.json_query_service import (
+                validate_json_query as _vjq_live,
+                build_boolean_string as _bbs_live,
             )
-            st.caption("**Terms:** " + "  ·  ".join(_preview_terms))
+            _schema_live = _vjq_live(_json_raw)
+            _combine_live = _schema_live.combine_with
+            _n_groups_live = len(_schema_live.groups)
+            _n_terms_live  = len(_schema_live.all_terms)
+            st.success(
+                f"✅ Valid — {_n_groups_live} groups, {_n_terms_live} terms "
+                f"(combined with **{_combine_live}**). Mistral expansion will be skipped."
+            )
+            st.caption(f"**Boolean Query:** `{_bbs_live(_schema_live)}`")
+            # Nudge toward richer groups
+            _thin = [
+                i + 1 for i, g in enumerate(_schema_live.groups)
+                if len(g.terms) < 3
+            ]
+            if _thin:
+                _glist = ", ".join(f"group {n}" for n in _thin)
+                st.warning(
+                    f"⚠️ {_glist} {'has' if len(_thin) == 1 else 'have'} fewer than 3 terms. "
+                    "Consider adding more synonyms or a specific technical phrase to improve precision."
+                )
         except Exception as _json_err:
             st.error(f"❌ Invalid JSON — {_json_err}")
     else:
@@ -182,17 +220,10 @@ st.divider()
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _queries_from_json(raw: str) -> list[str]:
-    """Return a flat list of unique search terms from the structured JSON query format."""
-    parsed = json.loads(raw)
-    terms: list[str] = []
-    seen: set[str] = set()
-    for group in parsed.get("groups", []):
-        for t in group.get("terms", []):
-            t = str(t).strip()
-            if t and t not in seen:
-                terms.append(t)
-                seen.add(t)
-    return terms
+    """Return a flat list of unique search terms from the structured JSON query."""
+    from services.json_query_service import validate_json_query as _vjq
+    schema = _vjq(raw)
+    return schema.all_terms
 
 
 def _run_expand(q: str) -> tuple[list[str], dict]:
@@ -241,6 +272,27 @@ def _timed(label: str, fn, *args, **kwargs):
     return result
 
 
+# ── Group-match badge helpers ───────────────────────────────────────────────
+_GROUP_COLOURS = ["#3B82F6", "#10B981", "#F59E0B", "#8B5CF6", "#EC4899", "#EF4444"]
+
+def _group_badge_html(group_idx: int, term: str) -> str:
+    colour = _GROUP_COLOURS[group_idx % len(_GROUP_COLOURS)]
+    return (
+        f'<span style="background:{colour};color:#fff;'
+        f'padding:1px 8px;border-radius:10px;font-size:0.78em;'
+        f'margin-left:6px;white-space:nowrap">'
+        f'G{group_idx + 1} {term}</span>'
+    )
+
+def _badges_for(title: str, abstract: str, groups: list) -> str:
+    """Return HTML: escaped title + coloured group-match badge spans."""
+    from services.json_query_service import match_groups_in_text
+    matches = match_groups_in_text(f"{title} {abstract or ''}", groups)
+    badges  = "".join(_group_badge_html(idx, term) for idx, term in matches)
+    safe    = title.replace("<", "&lt;").replace(">", "&gt;")
+    return f"{safe}{badges}"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # STAGE EXECUTION
 # ══════════════════════════════════════════════════════════════════════════════
@@ -274,15 +326,14 @@ if run_to_top20 and query.strip():
                     build_uspto_url as _buu,
                     fetch_result_count as _frc,
                 )
-                _schema        = _vjq(_active_json)
-                _bool_str      = _bbs(_schema)
-                _pv_query      = _bpq(_schema)
-                _uspto_url     = _buu(_bool_str)
-                expanded       = _json_terms
-                metadata       = {}
-                evaluation     = {}
+                _schema    = _vjq(_active_json)
+                _bool_str  = _bbs(_schema)
+                _uspto_url = _buu(_bool_str)
+                expanded   = _schema.all_terms
+                metadata   = {}
+                evaluation = {}
                 logger.info("JSON Boolean query: %s", _bool_str)
-                logger.info("JSON expansion terms: %s", expanded)
+                logger.info("JSON expansion terms (%d): %s", len(expanded), expanded)
 
             # Fetch PatentsView count in a second spinner (network call)
             with st.spinner("Fetching result count from PatentsView…"):
@@ -291,6 +342,7 @@ if run_to_top20 and query.strip():
             st.session_state.json_boolean      = _bool_str
             st.session_state.json_uspto_url    = _uspto_url
             st.session_state.json_result_count = _count
+            st.session_state.json_groups       = [g.terms for g in _schema.groups]
         else:
             with st.spinner("Stage 1/3 — Expanding query with Mistral…"):
                 expanded, metadata = _timed("1. Query expansion", _run_expand, query)
@@ -376,20 +428,17 @@ with tab_expand:
             _jcount = st.session_state.json_result_count
             _count_label = f"{_jcount:,}" if _jcount is not None else "—"
             _term_count  = len(st.session_state.expanded_queries)
+            _n_groups    = len(st.session_state.json_groups)
 
             mc1, mc2, mc3 = st.columns(3)
-            mc1.metric("Terms used", _term_count)
-            mc2.metric("PatentsView hits", _count_label)
-            mc3.metric(
-                "Groups",
-                len([g for g in st.session_state.json_query.split('"terms"') if g]) - 1
-                if st.session_state.json_query else "—"
-            )
+            mc1.metric("Groups", _n_groups)
+            mc2.metric("Unique terms", _term_count)
+            mc3.metric("PatentsView hits", _count_label)
 
             # USPTO link
             if st.session_state.json_uspto_url:
                 st.markdown(
-                    f'🔗 **[Open in USPTO Patent Full-Text Search]({st.session_state.json_uspto_url})**',
+                    f"🔗 **[Open in USPTO Patent Full-Text Search]({st.session_state.json_uspto_url})**",
                     unsafe_allow_html=False,
                 )
                 with st.expander("Show raw USPTO URL", expanded=False):
@@ -490,7 +539,12 @@ with tab_search:
         unique_count = len(st.session_state.unique_patents)
         dupes        = raw_count - unique_count
 
-        m1, m2, m3 = st.columns(3)
+        _pv_total = st.session_state.json_result_count
+        if _pv_total is not None:
+            m1, m2, m3, m4 = st.columns(4)
+            m4.metric("PatentsView total", f"{_pv_total:,}")
+        else:
+            m1, m2, m3 = st.columns(3)
         m1.metric("Raw fetched",  raw_count)
         m2.metric("After dedup",  unique_count)
         m3.metric("Duplicates removed", dupes)
@@ -510,8 +564,15 @@ with tab_search:
                      column_config={"title": st.column_config.TextColumn(width="large")})
         st.divider()
         st.subheader("Readable titles")
-        for r in rows:
-            st.write(f"• {r['patent_id']} — {r['title']}")
+        _jg = st.session_state.json_groups
+        for p in st.session_state.unique_patents:
+            if _jg:
+                st.markdown(
+                    "• " + _badges_for(p.patent_title or "", p.patent_abstract or "", _jg),
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.write(f"• {p.patent_id} — {p.patent_title}")
     else:
         st.info("Run the pipeline to see raw search results here.")
 
@@ -553,8 +614,17 @@ with tab_rank:
         )
         st.divider()
         st.subheader("Readable titles")
-        for r in rows:
-            st.write(f"{r['#']}. {r['patent_id']} — {r['title']}")
+        _jg = st.session_state.json_groups
+        for i, rp in enumerate(st.session_state.ranked, 1):
+            p = rp.patent
+            if _jg:
+                st.markdown(
+                    f"{i}. <b>{p.patent_id}</b> — "
+                    + _badges_for(p.patent_title or "", p.patent_abstract or "", _jg),
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.write(f"{i}. {p.patent_id} — {p.patent_title}")
 
         st.divider()
         st.subheader("Score distribution")
@@ -574,6 +644,17 @@ with tab_rank:
         p  = rp.patent
         st.markdown(f"**ID:** `{p.patent_id}`")
         st.markdown(f"**Title:** {p.patent_title}")
+        _jg = st.session_state.json_groups
+        if _jg:
+            from services.json_query_service import match_groups_in_text
+            _matches = match_groups_in_text(
+                f"{p.patent_title} {p.patent_abstract or ''}", _jg
+            )
+            if _matches:
+                _badge_html = " ".join(_group_badge_html(idx, term) for idx, term in _matches)
+                st.markdown(f"**Matched groups:** {_badge_html}", unsafe_allow_html=True)
+            else:
+                st.caption("🔴 No group terms matched in this patent's title or abstract.")
         st.markdown(f"**Type:** {p.patent_type or '—'}   **Date:** {p.patent_date or '—'}")
         st.markdown(f"**Hybrid:** `{rp.hybrid_score:.4f}`  |  "
                     f"**Cosine:** `{rp.cosine_score:.4f}`  |  "

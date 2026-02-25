@@ -87,7 +87,7 @@ def validate_json_query(raw_str: str) -> JsonQuerySchema:
         raise ValueError(f"Invalid JSON syntax — {exc}") from exc
 
     if not isinstance(data, dict):
-        raise ValueError("JSON must be an object (not an array or scalar).")
+        raise ValueError('JSON must be a single object { "groups": [...] }.')
 
     raw_groups = data.get("groups")
     if not raw_groups or not isinstance(raw_groups, list):
@@ -119,22 +119,29 @@ def validate_json_query(raw_str: str) -> JsonQuerySchema:
 # Boolean string builder
 # ---------------------------------------------------------------------------
 
+def _quote_term(term: str) -> str:
+    """Wrap multi-word terms in double quotes for phrase matching."""
+    return f'"{term}"' if " " in term else term
+
+
 def build_boolean_string(schema: JsonQuerySchema) -> str:
     """
     Build a human-readable (and USPTO-compatible) Boolean query string.
 
+    Multi-word terms are wrapped in double quotes for phrase matching.
+
     Example
     -------
-    Input groups: [["A", "B"], ["C", "D"]], combine_with="AND"
-    Output: "(A OR B) AND (C OR D)"
+    Input groups: [["autonomous vehicle", "self-driving vehicle"], ["IR"]], combine_with="AND"
+    Output: '("autonomous vehicle" OR "self-driving vehicle") AND IR'
     """
     parts: list[str] = []
     for g in schema.groups:
-        if len(g.terms) == 1:
-            # No parentheses needed for a single term
-            parts.append(g.terms[0])
+        quoted = [_quote_term(t) for t in g.terms]
+        if len(quoted) == 1:
+            parts.append(quoted[0])
         else:
-            inner = " OR ".join(g.terms)
+            inner = " OR ".join(quoted)
             parts.append(f"({inner})")
 
     joiner = f" {schema.combine_with} "
@@ -241,3 +248,33 @@ def fetch_result_count(schema: JsonQuerySchema) -> Optional[int]:
     except Exception as exc:
         log.warning("Failed to fetch result count: %s", exc)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Group match highlight
+# ---------------------------------------------------------------------------
+
+def match_groups_in_text(
+    text: str,
+    groups: list[list[str]],
+) -> list[tuple[int, str]]:
+    """
+    Return a ``(group_index, matched_term)`` tuple for every group that has
+    at least one term appearing in *text* (case-insensitive substring match).
+    Only the first matching term per group is reported.
+
+    Args:
+        text:   Typically ``patent_title + " " + patent_abstract``.
+        groups: List of term lists, one per group (as stored in session state).
+
+    Returns:
+        Ordered list of ``(group_index, matched_term)``; empty if no matches.
+    """
+    text_lower = text.lower()
+    matches: list[tuple[int, str]] = []
+    for i, terms in enumerate(groups):
+        for term in terms:
+            if term.lower() in text_lower:
+                matches.append((i, term))
+                break   # one representative term per group is enough
+    return matches

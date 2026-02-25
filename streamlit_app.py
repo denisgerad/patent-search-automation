@@ -53,6 +53,10 @@ _DEFAULTS = {
     "stage": 0,          # 0=idle 1=expanded 2=searched 3=ranked 4=analysed
     "error": "",
     "elapsed": {},
+    "json_query": "",       # optional structured JSON query (raw text)
+    "json_boolean": "",      # generated Boolean string
+    "json_uspto_url": "",    # USPTO Full Text link
+    "json_result_count": None,  # PatentsView total_patent_count
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -110,6 +114,58 @@ query = st.text_area(
     key="query_input",
 )
 
+# ── JSON format input ──────────────────────────────────────────────────────────
+_JSON_PLACEHOLDER = (
+    '{\n'
+    '  "groups": [\n'
+    '    { "terms": ["autonomous vehicle", "self-driving vehicle"] },\n'
+    '    { "terms": ["lane detection", "lane recognition"] },\n'
+    '    { "terms": ["infrared sensor", "IR detector"] }\n'
+    '  ],\n'
+    '  "combine_groups_with": "AND"\n'
+    '}'
+)
+
+with st.expander("📋 JSON Format  *(optional — overrides Mistral expansion)*", expanded=bool(st.session_state.json_query)):
+    st.caption(
+        "Paste a structured JSON query to bypass Mistral and use your own term groups. "
+        "The **Technology query** above is still used for embedding-based ranking."
+    )
+    _json_raw = st.text_area(
+        "json_query_area",
+        value=st.session_state.json_query,
+        height=190,
+        placeholder=_JSON_PLACEHOLDER,
+        label_visibility="collapsed",
+        key="json_query_input",
+    )
+    st.session_state.json_query = _json_raw
+
+    # Live validation
+    if _json_raw.strip():
+        try:
+            _parsed_json = json.loads(_json_raw)
+            if not isinstance(_parsed_json, dict) or "groups" not in _parsed_json:
+                raise ValueError('JSON must have a top-level "groups" key.')
+            _preview_terms: list[str] = []
+            for _g in _parsed_json["groups"]:
+                for _t in _g.get("terms", []):
+                    if str(_t).strip():
+                        _preview_terms.append(str(_t).strip())
+            if not _preview_terms:
+                raise ValueError("No terms found inside groups.")
+            _combine = _parsed_json.get("combine_groups_with", "AND").upper()
+            st.success(
+                f"✅ Valid — {len(_preview_terms)} terms across "
+                f"{len(_parsed_json['groups'])} groups "
+                f"(combined with **{_combine}**). Mistral expansion will be skipped."
+            )
+            st.caption("**Terms:** " + "  ·  ".join(_preview_terms))
+        except Exception as _json_err:
+            st.error(f"❌ Invalid JSON — {_json_err}")
+    else:
+        st.caption("_No JSON pasted — Mistral expansion will run normally._")
+
 col1, col2, col3 = st.columns([2, 2, 1])
 run_to_top20 = col1.button("▶ Run to Top 20", type="primary", use_container_width=True)
 run_claude   = col2.button("🤖 Send Top 20 to Claude", use_container_width=True,
@@ -124,6 +180,20 @@ st.divider()
 # ══════════════════════════════════════════════════════════════════════════════
 # HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _queries_from_json(raw: str) -> list[str]:
+    """Return a flat list of unique search terms from the structured JSON query format."""
+    parsed = json.loads(raw)
+    terms: list[str] = []
+    seen: set[str] = set()
+    for group in parsed.get("groups", []):
+        for t in group.get("terms", []):
+            t = str(t).strip()
+            if t and t not in seen:
+                terms.append(t)
+                seen.add(t)
+    return terms
+
 
 def _run_expand(q: str) -> tuple[list[str], dict]:
     """Expand query and return (expanded_queries, structured_metadata)."""
@@ -177,23 +247,65 @@ def _timed(label: str, fn, *args, **kwargs):
 
 if run_to_top20 and query.strip():
     logger.info("Run to Top 20 clicked — starting pipeline for query: %s", query)
+    # Preserve JSON query text across the reset
+    _saved_json = st.session_state.json_query
     _reset()
+    st.session_state.json_query = _saved_json
+
+    # Determine whether to use the pasted JSON or Mistral expansion
+    _active_json = st.session_state.json_query.strip()
+    _use_json_expansion = False
+    _json_terms: list[str] = []
+    if _active_json:
+        try:
+            _json_terms = _queries_from_json(_active_json)
+            _use_json_expansion = bool(_json_terms)
+        except Exception as _je:
+            logger.warning("JSON query parse failed at run time: %s", _je)
+
     try:
         # Stage 1 — expand
-        with st.spinner("Stage 1/3 — Expanding query with Mistral…"):
-            expanded, metadata = _timed("1. Query expansion", _run_expand, query)
-            logger.debug("Expansion result: %s", expanded)
-            
-            # SCORING TEMPORARILY DISABLED — evaluate top-10 relevance manually.
-            # from services.query_evaluator import evaluate_expansion
-            # evaluation = evaluate_expansion(
-            #     original_query=query,
-            #     expanded_terms=expanded[1:],
-            #     structured_data=metadata
-            # )
-            evaluation = {}
-            logger.debug("Expansion evaluation: disabled")
-            
+        if _use_json_expansion:
+            with st.spinner(f"Stage 1/3 — Building Boolean from JSON ({len(_json_terms)} terms)…"):
+                from services.json_query_service import (
+                    validate_json_query as _vjq,
+                    build_boolean_string as _bbs,
+                    build_patentsview_query as _bpq,
+                    build_uspto_url as _buu,
+                    fetch_result_count as _frc,
+                )
+                _schema        = _vjq(_active_json)
+                _bool_str      = _bbs(_schema)
+                _pv_query      = _bpq(_schema)
+                _uspto_url     = _buu(_bool_str)
+                expanded       = _json_terms
+                metadata       = {}
+                evaluation     = {}
+                logger.info("JSON Boolean query: %s", _bool_str)
+                logger.info("JSON expansion terms: %s", expanded)
+
+            # Fetch PatentsView count in a second spinner (network call)
+            with st.spinner("Fetching result count from PatentsView…"):
+                _count = _frc(_schema)
+
+            st.session_state.json_boolean      = _bool_str
+            st.session_state.json_uspto_url    = _uspto_url
+            st.session_state.json_result_count = _count
+        else:
+            with st.spinner("Stage 1/3 — Expanding query with Mistral…"):
+                expanded, metadata = _timed("1. Query expansion", _run_expand, query)
+                logger.debug("Expansion result: %s", expanded)
+
+                # SCORING TEMPORARILY DISABLED — evaluate top-10 relevance manually.
+                # from services.query_evaluator import evaluate_expansion
+                # evaluation = evaluate_expansion(
+                #     original_query=query,
+                #     expanded_terms=expanded[1:],
+                #     structured_data=metadata
+                # )
+                evaluation = {}
+                logger.debug("Expansion evaluation: disabled")
+
         st.session_state.expanded_queries = expanded
         st.session_state.expansion_metadata = metadata
         st.session_state.expansion_evaluation = evaluation
@@ -251,14 +363,51 @@ tab_expand, tab_search, tab_rank, tab_claude = st.tabs([
 # ── Tab 1: Query Expansion ──────────────────────────────────────────────────
 with tab_expand:
     if st.session_state.expanded_queries:
-        st.success(f"{len(st.session_state.expanded_queries)} queries generated"
-                   + (" (incl. original)" if use_mistral else " (Mistral disabled)"))
-        
-        # Display expanded queries
-        for i, q in enumerate(st.session_state.expanded_queries):
-            label = "🔵 Original" if i == 0 else f"🟢 Expanded {i}"
-            st.markdown(f"**{label}:** {q}")
-        
+
+        # ── JSON mode panel ────────────────────────────────────────────────
+        if st.session_state.json_boolean:
+            st.subheader("📋 JSON Query Results")
+
+            # Boolean query
+            st.markdown("**Generated Boolean Query**")
+            st.code(st.session_state.json_boolean, language="")
+
+            # Metrics row
+            _jcount = st.session_state.json_result_count
+            _count_label = f"{_jcount:,}" if _jcount is not None else "—"
+            _term_count  = len(st.session_state.expanded_queries)
+
+            mc1, mc2, mc3 = st.columns(3)
+            mc1.metric("Terms used", _term_count)
+            mc2.metric("PatentsView hits", _count_label)
+            mc3.metric(
+                "Groups",
+                len([g for g in st.session_state.json_query.split('"terms"') if g]) - 1
+                if st.session_state.json_query else "—"
+            )
+
+            # USPTO link
+            if st.session_state.json_uspto_url:
+                st.markdown(
+                    f'🔗 **[Open in USPTO Patent Full-Text Search]({st.session_state.json_uspto_url})**',
+                    unsafe_allow_html=False,
+                )
+                with st.expander("Show raw USPTO URL", expanded=False):
+                    st.text(st.session_state.json_uspto_url)
+
+            st.divider()
+            st.markdown("**Terms sent to PatentsView search:**")
+            for t in st.session_state.expanded_queries:
+                st.markdown(f"- `{t}`")
+
+        # ── Mistral expansion mode panel ────────────────────────────────────
+        else:
+            st.success(f"{len(st.session_state.expanded_queries)} queries generated"
+                       + (" (incl. original)" if use_mistral else " (Mistral disabled)"))
+            for i, q in enumerate(st.session_state.expanded_queries):
+                label = "🔵 Original" if i == 0 else f"🟢 Expanded {i}"
+                st.markdown(f"**{label}:** {q}")
+
         # Quality scoring temporarily disabled — focus on top-10 relevance.
         # To re-enable: restore the `if st.session_state.expansion_evaluation:` block.
         if False:  # DISABLED

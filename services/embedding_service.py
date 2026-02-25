@@ -64,16 +64,50 @@ def embed_patents(
     return vecs
 
 
-def embed_query(query: str, model: EmbeddingModel) -> np.ndarray:
+def embed_query(
+    query: str,
+    model: EmbeddingModel,
+    expanded: list[str] | None = None,
+) -> np.ndarray:
     """
-    Embed a single query string and return a 1-D normalised float32 array.
+    Embed a query string and return a 1-D normalised float32 array.
+
+    When *expanded* is supplied the original query is enriched with the
+    expanded terms before embedding.  The concatenated text is more
+    keyword-dense than the raw natural-language query alone, which
+    improves cosine similarity against patent abstracts (which are
+    written in technical, keyword-heavy prose).
+
+    The last entry of *expanded* is placed first after the original query
+    because — with the structural prompt — it is the KEYWORD-ONLY form
+    (3-5 critical technical keywords, no filler), making it the
+    most valuable signal for embedding alignment.  All other expansions
+    follow to add breadth.
 
     Args:
-        query: Free-text query string.
-        model: An initialised EmbeddingModel instance.
+        query:    Free-text query string (the original user input).
+        model:    An initialised EmbeddingModel instance.
+        expanded: Optional list returned by
+                  :func:`~services.query_expansion.expand_query`
+                  (includes the original at index 0).  Only the
+                  Mistral-generated alternatives (index 1 onward) are
+                  appended; the original is never duplicated.
 
     Returns:
-        1-D float32 array of shape (embedding_dim,).
+        1-D float32 array of shape (embedding_dim,), L2-normalised.
     """
-    vecs = model.embed([query])
+    if expanded and len(expanded) > 1:
+        alternatives = expanded[1:]  # skip index-0 (original query)
+        # Put the keyword-only form (last) immediately after the original
+        # for maximum embedding density, then append the rest.
+        ordered = [alternatives[-1]] + alternatives[:-1]
+        enriched = query + " " + " ".join(ordered)
+        logger.debug(
+            "embed_query: enriched text built from original + %d expansions",
+            len(alternatives),
+        )
+    else:
+        enriched = query
+
+    vecs = model.embed([enriched])
     return vecs[0]

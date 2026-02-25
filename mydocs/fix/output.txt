@@ -1,0 +1,26 @@
+search results
+10000000	Coherent LADAR using intra-pixel quadrature detection	utility	2018-06-19
+10000052	Methods for rejuvenating an imaging member of an ink-based digital printing system	utility	2018-06-19
+10000072	Printer and printing jig	utility	2018-06-19
+10000090	Pneumatic radial tire for passenger vehicle	utility	2018-06-19
+10000098	Tire pressure measurement device, an integrated circuit, a printed circuit board, a method and a computer program for a vehicle to receive data	utility	2018-06-19
+10000100	Piezoelectric based system and method for determining tire load	utility	2018-06-19
+10000168	Vehicle electrical system and method for operating a vehicle electrical system	utility	2018-06-19
+10000055	Method for operating a printing press	utility	2018-06-19
+10000121	Vehicle computer system with transparent display	utility	2018-06-19
+10000172	Detecting hazards in anticipation of opening vehicle doors	utility	2018-06-19
+10000194	Method, controller and system for monitoring brake operation	utility	2018-06-19
+10000249	Bicycle pedal	utility	2018-06-19
+10000155	Method and device for reproducing a lateral and/or rear surrounding area of a vehicle	utility	2018-06-19
+10000036	High kinetic energy penetrator shielding and high wear resistance materials fabricated with boron nitride nanotubes (BNNTS) and BNNT polymer composites	utility	2018-06-19
+10000110	Air conditioning system for motor vehicles	utility	2018-06-19
+10000124	Independent steering, power, torque control and transfer in vehicles	utility	2018-06-19
+
+top ranked
+1	10000124	Independent steering, power, torque control and transfer in vehicles	utility	2018-06-19	0.6816	0.5451	1
+2	10000000	Coherent LADAR using intra-pixel quadrature detection	utility	2018-06-19	0.574	0.5177	0.7052
+3	10000172	Detecting hazards in anticipation of opening vehicle doors	utility	2018-06-19	0.5584	0.6219	0.4103
+4	10000168	Vehicle electrical system and method for operating a vehicle electrical system	utility	2018-06-19	0.5133	0.4719	0.6099
+5	10000121	Vehicle computer system with transparent display	utility	2018-06-19	0.4666	0.5412	0.2924
+6	10000100	Piezoelectric based system and method for determining tire load	utility	2018-06-19	0.4639	0.4939	0.3937
+7	10000194	Method, controller and system for monitoring brake operation	utility	2018-06-19	0.4573	0.5036	0.3491

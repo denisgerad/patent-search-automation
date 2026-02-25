@@ -1,0 +1,188 @@
+Looking at your results, the scores are consistently low (17-23/100) with the same pattern across all queries. Let me diagnose the exact issues.
+What the Scores Are Telling You
+Every query scores 0/20 on Structural grouping, Domain preservation is only 3/20, and Generic leakage control is the only passing category at 14/20. More critically — no patents are being returned at all. The expansion quality is a secondary problem; the primary problem is that your queries are now too specific after the constraint changes, returning zero results from PatentsView.
+The pattern is clear: you’ve overcorrected from “too broad” (returning everything) to “too narrow” (returning nothing).
+
+Root Cause Analysis
+Problem 1: _text_phrase with long constrained queries returns zero results
+Your bigram approach for longer queries is creating AND conditions that are too strict. For "infrared transducer for lane detection in autonomous driving systems", after stop word stripping you might get bigrams like "infrared transducer" AND "lane detection" AND "autonomous driving" — all three must co-occur in the same patent. PatentsView’s corpus may simply have no patents phrasing it that way.
+Problem 2: Mistral is over-synonymizing
+Your taxonomy’s patent_synonyms are being injected too aggressively. "sensor" → "transducer", "camera" → "optical detector" — these substitutions are happening in every query. Real patents do use these terms, but not exclusively. You’ve traded natural language for patent-ese uniformly, killing recall.
+Problem 3: Structural grouping is 0/20 across the board
+This tells you the expanded queries all have the same structure — they’re variations of the original with synonym swaps, not genuinely different structural approaches (method claims vs. apparatus claims vs. system claims).
+
+The Fix: Three-Tier Query Strategy
+Instead of applying the same query construction to all expansions, build three tiers with different specificity levels deliberately:
+
+# services/query_builder.py
+
+from dataclasses import dataclass
+from services.token_extractor import ExtractedTokens
+
+@dataclass
+class QueryTier:
+queries: list[str]
+strategy: str # "broad" | "medium" | "narrow"
+description: str
+
+def build_tiered_queries(
+original: str,
+expanded: list[str],
+tokens: ExtractedTokens
+) -> list[QueryTier]:
+"""
+Build three tiers of queries with different specificity.
+Broad tier ensures we always get SOME results.
+Narrow tier finds the most relevant patents when they exist.
+"""
+
+# TIER 1: BROAD — single key technical term only
+# These use _text_any and will always return results
+# Use the most domain-specific single token from extraction
+broad_queries = _build_broad_queries(tokens)
+
+# TIER 2: MEDIUM — two-term phrase matching
+# These use _text_phrase with pairs of critical tokens
+medium_queries = _build_medium_queries(tokens)
+
+# TIER 3: NARROW — full constrained phrase (your current approach)
+# Only run if broader tiers return enough results
+narrow_queries = _build_narrow_queries(expanded, tokens)
+
+return [
+QueryTier(broad_queries, "broad", "Single domain anchor"),
+QueryTier(medium_queries, "medium", "Two-term phrase match"),
+QueryTier(narrow_queries, "narrow", "Full constrained phrase"),
+]
+
+
+def _build_broad_queries(tokens: ExtractedTokens) -> list[str]:
+"""
+One query per critical token using _text_any.
+Guaranteed to return results — acts as the safety net.
+"""
+queries = []
+for token in tokens.critical_tokens[:3]: # top 3 only
+queries.append({"_text_any": {"patent_abstract": token}})
+return queries
+
+
+def _build_medium_queries(tokens: ExtractedTokens) -> list[str]:
+"""
+Pair critical tokens for phrase matching.
+e.g. "lane detection" + "infrared" as separate phrase conditions.
+"""
+queries = []
+critical = tokens.critical_tokens
+
+# Pair each critical token with each patent synonym
+for i, token in enumerate(critical[:2]):
+for synonym in tokens.patent_synonyms[:2]:
+queries.append({
+"_and": [
+{"_or": [
+{"_text_phrase": {"patent_title": token}},
+{"_text_phrase": {"patent_abstract": token}},
+]},
+{"_or": [
+{"_text_phrase": {"patent_title": synonym}},
+{"_text_phrase": {"patent_abstract": synonym}},
+]},
+]
+})
+return queries[:4] # cap at 4 medium queries
+
+
+def _build_narrow_queries(
+expanded: list[str],
+tokens: ExtractedTokens
+) -> list[str]:
+"""
+Full constrained queries from Mistral expansion.
+These will sometimes return zero — that's acceptable at this tier.
+"""
+return expanded[:3] # only top 3 narrow queries
+
+
+Update the pipeline to use tiered execution with fallback:
+
+# orchestrator/patent_pipeline.py (updated search block)
+
+from services.query_builder import build_tiered_queries, QueryTier
+from services.search_service import fetch_patents_for_query_dict
+
+MIN_RESULTS_THRESHOLD = 10 # minimum acceptable results before falling back
+
+def _execute_tiered_search(
+original: str,
+expanded: list[str],
+tokens,
+min_threshold: int = MIN_RESULTS_THRESHOLD
+) -> list[PatentRecord]:
+"""
+Execute search across tiers, stopping when we have enough results.
+Falls back to broader tiers if narrow returns too few.
+"""
+tiers = build_tiered_queries(original, expanded, tokens)
+all_patents = []
+
+for tier in tiers: # broad → medium → narrow
+tier_results = []
+for query_dict in tier.queries:
+results = fetch_patents_for_query_dict(query_dict)
+tier_results.extend(results)
+
+log.info(f"Tier '{tier.strategy}' returned {len(tier_results)} patents")
+all_patents.extend(tier_results)
+
+# If broad tier already gives us enough, skip narrower tiers
+# If narrow tier adds nothing, we still have broad results
+if tier.strategy == "broad" and len(tier_results) >= min_threshold:
+log.info("Broad tier sufficient, running medium for precision boost")
+# Still run medium but we know we have a safety net
+continue
+
+if tier.strategy == "narrow" and len(tier_results) == 0:
+log.warning("Narrow tier returned 0 results — broad/medium results will be used")
+
+return all_patents
+
+
+Add fetch_patents_for_query_dict to search_service.py — a clean internal method that accepts pre-built query dicts:
+
+# services/search_service.py (add this method)
+
+def fetch_patents_for_query_dict(query_dict: dict) -> list[PatentRecord]:
+"""
+Execute a single pre-built PatentsView query dict.
+Used by the tiered query builder — separates query construction
+from query execution cleanly.
+"""
+return _fetch_all_for_query(query_dict)
+
+
+Fix the Structural Grouping Score (0/20)
+Your evaluator penalizes you because all 5 expanded queries have the same grammatical structure. Fix the Mistral prompt to explicitly request structural variety:
+
+# prompts/query_expansion.txt (updated)
+
+You are a patent search expert. Generate {n_expansions} queries with
+DIFFERENT STRUCTURAL FORMS — not just synonym swaps.
+
+MANDATORY: Each query must use a different structure from this list:
+1. APPARATUS: "System/apparatus/device for [function] using [technology]"
+2. METHOD: "Method for [function] comprising [technology] steps"
+3. COMPOUND: "[Technology]-based [function] in [domain]"
+4. CLAIM-STYLE: "[Technology] [domain] [function] system wherein..."
+5. KEYWORD-ONLY: 3-5 critical technical keywords only, no filler words
+
+ORIGINAL QUERY: {original_query}
+MANDATORY TOKENS (must appear in every query): {critical_tokens}
+
+Return ONLY a JSON array of 5 strings, one per structure type above, in order.
+
+
+This directly addresses the 0/20 structural grouping — you get one apparatus-style, one method-style, one compound, one claim-style, and one keyword-only query. The keyword-only query (type 5) is particularly powerful for PatentsView because it avoids phrase-match failures entirely.
+
+Summary of Changes
+The three changes working together fix different failure modes. The tiered query strategy ensures you always get results by running broad single-token searches first, then progressively narrowing. The structural prompt fix addresses the 0/20 grouping score by forcing Mistral to generate genuinely different query forms rather than synonym variations of the same sentence. Adding fetch_patents_for_query_dict as a clean internal method keeps query construction and query execution properly separated per your architecture, which matters as this grows into the FastAPI surface.​​​​​​​​​​​​​​​​

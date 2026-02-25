@@ -1,0 +1,234 @@
+User Prompt
+↓
+┌─────────────────────────────────┐
+│ Critical Token Extractor │ ← deterministic, rule-based
+│ + Domain Concept Classifier │ ← runs simultaneously
+└─────────────────────────────────┘
+↓
+Mistral receives: original + locked_tokens + domain_concepts as constraints
+↓
+Constraint Validation (filter Mistral output)
+↓
+Query Builder → PatentsView
+
+Implementation — Step by Step
+Step 1: Critical Token Extractor (services/token_extractor.py)
+This is fully deterministic — no LLM involved. It uses a domain taxonomy to identify which tokens in the user query are non-negotiable anchors.
+
+# services/token_extractor.py
+
+from dataclasses import dataclass
+
+# Domain taxonomy: maps surface forms to canonical patent concepts
+DOMAIN_TAXONOMY = {
+"sensor": {
+"terms": ["infrared", "lidar", "radar", "camera", "ultrasonic",
+"ir sensor", "thermal sensor", "depth sensor"],
+"patent_synonyms": ["sensing device", "detector", "transducer"]
+},
+"autonomous_vehicle": {
+"terms": ["autonomous vehicle", "self-driving", "ego vehicle",
+"driverless", "adas", "advanced driver assistance"],
+"patent_synonyms": ["autonomous driving system", "vehicle control system"]
+},
+"detection": {
+"terms": ["lane detection", "pedestrian detection", "object detection",
+"crosswalk detection", "crossing detection"],
+"patent_synonyms": ["recognition system", "identification method",
+"classification system"]
+},
+"imaging": {
+"terms": ["camera", "camera-based", "vision", "image processing",
+"computer vision", "optical"],
+"patent_synonyms": ["imaging system", "visual sensor", "optical detector"]
+},
+}
+
+@dataclass
+class ExtractedTokens:
+critical_tokens: list[str] # must appear in every search query
+domain_concepts: list[str] # high-level domain labels
+patent_synonyms: list[str] # alternative patent vocabulary
+original_query: str
+
+def extract_critical_tokens(query: str) -> ExtractedTokens:
+"""
+Deterministically extract domain-anchoring tokens from the user query.
+These become mandatory constraints passed to Mistral.
+"""
+query_lower = query.lower()
+critical_tokens = []
+domain_concepts = []
+patent_synonyms = []
+
+for concept, data in DOMAIN_TAXONOMY.items():
+matched_terms = [t for t in data["terms"] if t in query_lower]
+if matched_terms:
+critical_tokens.extend(matched_terms)
+domain_concepts.append(concept)
+patent_synonyms.extend(data["patent_synonyms"])
+
+# Fallback: extract noun phrases via simple heuristic if taxonomy misses
+if not critical_tokens:
+critical_tokens = _fallback_noun_extraction(query)
+
+return ExtractedTokens(
+critical_tokens=list(set(critical_tokens)),
+domain_concepts=list(set(domain_concepts)),
+patent_synonyms=list(set(patent_synonyms)),
+original_query=query,
+)
+
+def _fallback_noun_extraction(query: str) -> list[str]:
+"""
+Simple fallback: extract hyphenated compounds and multi-word
+technical terms when taxonomy has no match.
+"""
+import re
+# Extract hyphenated technical terms (e.g. camera-based, sensor-fusion)
+hyphenated = re.findall(r'\b\w+-\w+\b', query.lower())
+# Extract words > 6 chars (likely technical, not stop words)
+long_words = [w for w in query.lower().split() if len(w) > 6]
+return list(set(hyphenated + long_words))
+
+
+Step 2: Constrained Query Expansion (prompts/query_expansion.txt + services/query_expansion.py)
+Mistral now receives the extracted tokens as hard constraints, not just the raw query.
+
+# prompts/query_expansion.txt
+
+You are a patent search expert with deep knowledge of USPTO patent terminology.
+
+ORIGINAL QUERY: {original_query}
+
+MANDATORY DOMAIN CONCEPTS (these MUST appear or be directly referenced in every query you generate):
+{critical_tokens}
+
+KNOWN PATENT SYNONYMS for these concepts:
+{patent_synonyms}
+
+Your task: Generate {n_expansions} alternative search queries for patent search.
+
+Rules:
+1. Every query MUST contain at least one term from MANDATORY DOMAIN CONCEPTS or its synonym
+2. Use formal patent language (e.g. "detection system" not "finds things")
+3. Replace user-friendly terms with their patent equivalents from the synonyms list
+4. Vary specificity: include 2 broad queries and 2 narrow queries
+5. Return ONLY a JSON array of strings, no explanation, no preamble
+
+Example for "camera system for road marking detection":
+["vision-based road marking detection system",
+"optical lane boundary recognition apparatus",
+"image processing method for road surface marking identification",
+"camera sensor road lane detection autonomous vehicle"]
+
+
+# services/query_expansion.py (updated)
+
+import json
+from services.token_extractor import extract_critical_tokens, ExtractedTokens
+from models.mistral_client import MistralClient
+from utils.logger import get_logger
+
+log = get_logger(__name__)
+PROMPT_TEMPLATE = open("prompts/query_expansion.txt").read()
+
+def expand_query(query: str, client: MistralClient, n_expansions: int = 5) -> tuple[list[str], ExtractedTokens]:
+"""
+Returns expanded query list AND the extracted tokens (for validation).
+"""
+tokens = extract_critical_tokens(query)
+log.info("Extracted tokens", extra={
+"critical": tokens.critical_tokens,
+"concepts": tokens.domain_concepts
+})
+
+prompt = PROMPT_TEMPLATE.format(
+original_query=query,
+critical_tokens=", ".join(tokens.critical_tokens),
+patent_synonyms=", ".join(tokens.patent_synonyms),
+n_expansions=n_expansions,
+)
+
+raw = client.generate(prompt)
+
+try:
+expanded = json.loads(raw)
+if not isinstance(expanded, list):
+raise ValueError("Expected JSON array")
+except (json.JSONDecodeError, ValueError):
+log.warning("Mistral expansion parse failed, using original")
+expanded = []
+
+# Always include original query + patent synonyms as fallback
+all_queries = [query] + expanded
+return all_queries, tokens
+
+
+Step 3: Constraint Validation (services/constraint_validator.py)
+Filter out any Mistral-generated queries that drifted away from the domain.
+
+# services/constraint_validator.py
+
+from services.token_extractor import ExtractedTokens
+from utils.logger import get_logger
+
+log = get_logger(__name__)
+
+def validate_queries(queries: list[str], tokens: ExtractedTokens) -> list[str]:
+"""
+Remove any expanded query that contains none of the critical tokens
+or their patent synonyms. Prevents Mistral drift.
+"""
+all_anchors = set(
+t.lower() for t in tokens.critical_tokens + tokens.patent_synonyms
+)
+
+validated = []
+for q in queries:
+q_lower = q.lower()
+if any(anchor in q_lower for anchor in all_anchors):
+validated.append(q)
+else:
+log.warning("Query failed constraint validation — dropped",
+extra={"query": q, "anchors": list(all_anchors)})
+
+# Safety: always keep the original query
+if not validated:
+log.warning("All expansions failed validation, using original only")
+validated = [tokens.original_query]
+
+log.info(f"Validation: {len(queries)} queries in → {len(validated)} out")
+return validated
+
+
+Step 4: Wire into the Pipeline (orchestrator/patent_pipeline.py)
+
+# orchestrator/patent_pipeline.py (updated expansion + validation block)
+
+from services.query_expansion import expand_query
+from services.constraint_validator import validate_queries
+from services.token_extractor import extract_critical_tokens
+
+def run_pipeline(query: str) -> PipelineResult:
+# 1. Expand with constraints
+expanded_queries, tokens = expand_query(query, mistral_client)
+log.info(f"Expanded to {len(expanded_queries)} queries")
+
+# 2. Validate — drop any query that lost the domain anchor
+validated_queries = validate_queries(expanded_queries, tokens)
+log.info(f"Validated: {len(validated_queries)} queries proceed to search")
+
+# 3. Search (existing logic)
+raw_patents = search_service.fetch_all_patents(validated_queries)
+
+# ... rest of pipeline unchanged
+
+
+What This Fixes for Your Two Queries
+For "camera-based system for detecting pedestrian crossings in autonomous vehicles":
+∙ Token extractor identifies: camera-based → imaging concept, pedestrian → detection concept, autonomous vehicles → autonomous_vehicle concept
+∙ Mistral is constrained to keep imaging system / optical detector + pedestrian detection / crosswalk detection + autonomous driving system in every expansion
+∙ Constraint validator drops any query Mistral generates that loses these anchors
+∙ Result: searches like "vision-based pedestrian crosswalk detection autonomous driving system" instead of drifting to "computer vision image processing"
+The taxonomy in token_extractor.py is the key artifact to grow over time — every new domain you search (medical devices, semiconductors, etc.) just needs a new taxonomy block added.​​​​​​​​​​​​​​​​

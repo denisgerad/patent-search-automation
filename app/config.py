@@ -66,7 +66,22 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Pipeline behaviour
     # ------------------------------------------------------------------
-    top_k_results: int = 20   # patents forwarded to LLM comparison stage
+    top_k_results: int = 10   # patents forwarded to LLM comparison stage (PoC: top-10)
+
+    # Number of top candidates to send to Claude / LLM for detailed analysis.
+    # fix2.txt recommends verifying top 5 manually and running the LLM on top 3.
+    claude_top_k: int = 3
+
+    # Cosine threshold: patents scoring below this are discarded before ranking.
+    # Empirical scale:  <0.30 unrelated | 0.30–0.40 weak | 0.50 meaningful | 0.65 strong
+    # Set to 0.0 in .env to disable filtering entirely.
+    cosine_threshold: float = 0.45       # hard floor (PoC default)
+    cosine_threshold_min: float = 0.30   # never drop below this when auto-relaxing
+    cosine_min_candidates: int = 5       # guarantee at least this many pass the filter
+
+    # Hybrid threshold: require a minimum hybrid score for final candidates.
+    # Set to 0.0 in .env to disable hybrid filtering entirely.
+    hybrid_threshold: float = 0.45
 
     # ------------------------------------------------------------------
     # MySQL database credentials (read from .env)
@@ -90,6 +105,19 @@ class Settings(BaseSettings):
                 f"mysql+mysqlconnector://{self.db_user}:{pwd}"
                 f"@{self.db_host}/{self.db_name}"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _ensure_weights_sum(self) -> "Settings":
+        """Ensure bm25_weight + cosine_weight sums to 1.0.
+
+        If the user set weights in .env that don't sum to 1.0 we normalise them
+        proportionally so the hybrid formula remains stable.
+        """
+        total = float(self.bm25_weight + self.cosine_weight)
+        if abs(total - 1.0) > 1e-6 and total > 0.0:
+            self.bm25_weight = float(self.bm25_weight / total)
+            self.cosine_weight = float(self.cosine_weight / total)
         return self
 
     # PatentsView fields requested on every query.

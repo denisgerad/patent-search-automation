@@ -37,16 +37,15 @@ from utils.logger import get_logger  # noqa: E402
 log = get_logger(__name__)
 
 # Words that carry no technical meaning for patent search.
-# Passing them to PatentsView _text_any causes irrelevant results because
-# common words like "system", "using", "for" match thousands of patents.
+# Keep ONLY true linguistic stop words — never domain terms such as
+# "system", "method", "device" which are meaningful in patent queries.
 _STOP_WORDS: frozenset[str] = frozenset({
     "a", "an", "the", "and", "or", "of", "in", "for", "to", "with",
     "by", "on", "at", "from", "is", "are", "was", "were", "be", "been",
     "being", "have", "has", "had", "do", "does", "did", "will", "would",
     "could", "should", "may", "might", "shall", "can", "that", "this",
     "these", "those", "it", "its", "which", "who", "what", "where",
-    "when", "how", "using", "used", "use", "based", "related", "via",
-    "system", "method", "device", "apparatus", "process", "technique",
+    "when", "how", "using", "used", "use", "via",
 })
 
 
@@ -78,7 +77,7 @@ def _strip_stop_words(term: str) -> str:
     """
     tokens = [
         w for w in term.lower().split()
-        if w not in _STOP_WORDS and len(w) > 2
+        if w not in _STOP_WORDS and len(w) > 1  # allow 2-char terms like IR, AI
     ]
     cleaned = " ".join(tokens)
     if not cleaned:
@@ -103,6 +102,55 @@ def _build_term_query(term: str) -> dict:
             {"_text_any": {"patent_abstract": cleaned}},
         ]
     }
+
+
+def build_token_aware_query(critical_tokens: list[str]) -> dict:
+    """Build a structured ``_and`` query from a list of critical tokens.
+
+    Each token becomes a ``_text_any`` clause so individual words within the
+    token string can match anywhere in the abstract.  All clauses are wrapped
+    in ``_and``, meaning *every* token group must appear somewhere in the
+    patent — providing domain co-occurrence without phrase-match strictness.
+
+    Example for ``["distributed ledger", "interbank"]``::
+
+        {
+            "_and": [
+                {"_text_any": {"patent_abstract": "distributed ledger"}},
+                {"_text_any": {"patent_abstract": "interbank"}},
+            ]
+        }
+
+    Falls back to a plain ``_text_any`` OR query when fewer than two tokens
+    are supplied (an ``_and`` of one clause is unnecessary overhead).
+
+    Args:
+        critical_tokens: Non-empty list of token strings from
+            :func:`~services.token_extractor.extract_critical_tokens`.
+
+    Returns:
+        A ready-to-send PatentsView ``q`` payload dict.
+    """
+    if not critical_tokens:
+        return {"_text_any": {"patent_abstract": ""}}
+
+    # Single token — no _and needed, plain OR across title/abstract.
+    if len(critical_tokens) == 1:
+        token = critical_tokens[0]
+        return {
+            "_or": [
+                {"_text_any": {"patent_title": token}},
+                {"_text_any": {"patent_abstract": token}},
+            ]
+        }
+
+    # Multiple tokens — require all to co-occur (abstract searched only to
+    # avoid double-OR nesting; abstract contains all title text in practice).
+    and_clauses = [
+        {"_text_any": {"patent_abstract": token}}
+        for token in critical_tokens
+    ]
+    return {"_and": and_clauses}
 
 
 def _fetch_all_for_query(query: dict) -> list[PatentRecord]:
@@ -167,6 +215,7 @@ def _fetch_all_for_query(query: dict) -> list[PatentRecord]:
         }
 
         try:
+            log.info("Final USPTO Query: %s", json.dumps(query, indent=2))
             response = requests.post(url, headers=headers, json=params)
             page_number += 1
 
@@ -245,6 +294,27 @@ def _fetch_all_for_query(query: dict) -> list[PatentRecord]:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+def fetch_patents_for_query_dict(query_dict: dict) -> list[PatentRecord]:
+    """Execute a single pre-built PatentsView query dict.
+
+    Used by :mod:`services.query_builder` / the tiered search strategy in the
+    pipeline.  Separates query *construction* from query *execution* cleanly,
+    and keeps all pagination logic in one place.
+
+    Parameters
+    ----------
+    query_dict:
+        A ready-to-send PatentsView ``q`` payload, e.g.::
+
+            {"_text_any": {"patent_abstract": "lane detection"}}
+
+    Returns
+    -------
+    list[PatentRecord]
+    """
+    return _fetch_all_for_query(query_dict)
+
 
 def fetch_all_patents(query_terms: list[str]) -> list[PatentRecord]:
     """Fetch patents for every term in *query_terms* and return the combined list.

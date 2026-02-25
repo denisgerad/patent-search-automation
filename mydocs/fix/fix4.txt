@@ -1,0 +1,63 @@
+The Fix — use _text_phrase instead of _text_any
+_text_phrase requires the tokens to appear together, giving you phrase matching rather than token-level OR. Here's the corrected _build_term_query:
+pythondef _build_term_query(term: str) -> dict:
+    """
+    Use _text_phrase for precise matching instead of _text_any.
+    _text_any matches patents containing ANY single token (too broad).
+    _text_phrase requires tokens to appear as a phrase (domain-specific).
+    """
+    cleaned = _strip_stop_words(term)
+    
+    # Split into meaningful sub-phrases if the cleaned term is long
+    tokens = cleaned.split()
+    
+    if len(tokens) <= 3:
+        # Short query: single phrase match across title + abstract
+        return {
+            "_or": [
+                {"_text_phrase": {"patent_title": cleaned}},
+                {"_text_phrase": {"patent_abstract": cleaned}},
+            ]
+        }
+    else:
+        # Longer query: build AND of key bigrams to force co-occurrence
+        # e.g. "lane detection infrared sensors autonomous vehicle"
+        # → title/abstract must contain "lane detection" AND "infrared sensors"
+        bigrams = [f"{tokens[i]} {tokens[i+1]}" for i in range(0, len(tokens)-1, 2)]
+        and_clauses = []
+        for bigram in bigrams[:3]:  # cap at 3 bigrams to avoid over-constraining
+            and_clauses.append({
+                "_or": [
+                    {"_text_phrase": {"patent_title": bigram}},
+                    {"_text_phrase": {"patent_abstract": bigram}},
+                ]
+            })
+        return {"_and": and_clauses}
+Also fix your stop word list — "system" and "detection" should NOT be stripped for patent search. These are domain-meaningful terms:
+python_STOP_WORDS: frozenset[str] = frozenset({
+    # Keep ONLY true linguistic stop words — never domain terms
+    "a", "an", "the", "and", "or", "of", "in", "for", "to", "with",
+    "by", "on", "at", "from", "is", "are", "was", "were", "be", "been",
+    "being", "have", "has", "had", "do", "does", "did", "will", "would",
+    "could", "should", "may", "might", "shall", "can", "that", "this",
+    "these", "those", "it", "its", "which", "who", "what", "where",
+    "when", "how", "via", "using", "used", "use",
+    # REMOVED: "system", "method", "device", "apparatus", "process",
+    # "technique", "based", "related" — these appear in patent claims
+    # and stripping them destroys query specificity
+})
+Fix the 2-char filter too — "IR" is a critical domain abbreviation that your current len(w) > 2 filter silently drops:
+pythondef _strip_stop_words(term: str) -> str:
+    tokens = [
+        w for w in term.lower().split()
+        if w not in _STOP_WORDS and len(w) > 1  # allow 2-char terms like IR, AI, UV
+    ]
+    cleaned = " ".join(tokens)
+    if not cleaned:
+        log.warning("Stop-word stripping left empty query; using original",
+                    extra={"original": term})
+        return term
+    log.debug("Query cleaned", extra={"original": term, "cleaned": cleaned})
+    return cleaned
+Expected result after fix — your query "IR sensor-based lane detection infrared sensors" should now search for the phrase "lane detection" AND "infrared sensors" co-occurring, which will return patents about infrared-based lane detection systems rather than the first 10 patents alphabetically in the database.
+One final note: even after this fix, the ranking you saw (10000000 scoring 1.0000) will also need attention — that's your hybrid ranking giving a perfect score to whatever comes first, which suggests the cosine scores are being computed against embeddings that haven't warmed up or are comparing the query against itself. That's a separate issue in ranking_service.py worth checking once the search results look domain-relevant.

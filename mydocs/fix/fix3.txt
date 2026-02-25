@@ -1,0 +1,107 @@
+"""
+services/query_expansion.py
+
+Extracts structured search concepts from a user query using Mistral.
+"""
+
+import json
+import logging
+import sys
+from pathlib import Path
+from typing import Dict, List
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from models.mistral_client import MistralClient      # noqa: E402
+from utils.prompt_loader import load_prompt          # noqa: E402
+
+logger = logging.getLogger(__name__)
+
+PROMPT_TEMPLATE: str = load_prompt("query_expansion.txt")
+
+
+def extract_concepts(query: str, client: MistralClient) -> Dict[str, List[str]]:
+    """
+    Extract structured search concepts from user query.
+
+    Expected JSON format from Mistral:
+
+    {
+        "domain": [...],
+        "function": [...],
+        "technology": [...]
+    }
+
+    Returns:
+        Dict with keys: domain, function, technology.
+        Falls back to minimal structure if parsing fails.
+    """
+
+    prompt = PROMPT_TEMPLATE.format(query=query)
+    logger.debug("Concept extraction prompt sent to Mistral (query=%s)", query)
+
+    raw = client.generate(prompt)
+    logger.debug("Raw Mistral response: %s", raw)
+    # Attempt 1: direct JSON parse
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        # Attempt 2: extract JSON object from model output (in case of extra text
+        # or code fences). Look for the first '{' and last '}' and try to parse
+        # that substring.
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            snippet = raw[start:end + 1]
+            try:
+                data = json.loads(snippet)
+            except json.JSONDecodeError:
+                data = None
+        else:
+            data = None
+
+    # Validate / coerce structure
+    if isinstance(data, dict):
+        result = {}
+        for key in ["domain", "function", "technology"]:
+            val = data.get(key, [])
+            # If model returned a single string, coerce to list by splitting on
+            # commas; otherwise ensure we have a list of strings.
+            if isinstance(val, str):
+                items = [s.strip() for s in val.split(",") if s.strip()]
+            elif isinstance(val, list):
+                items = [str(s).strip() for s in val if str(s).strip()]
+            else:
+                items = []
+            result[key] = items
+
+        logger.info("Concept extraction successful for '%s'", query)
+        return result
+
+    # Final fallback: minimal decomposition
+    logger.warning("Concept extraction failed to produce JSON — using fallback.")
+    return {
+        "domain": [query],
+        "function": [],
+        "technology": []
+    }
+
+prompts/query_expansion.txt
+Extract structured patent search concepts from the following invention.
+
+Invention:
+"{query}"
+
+Return valid JSON in this format:
+
+{
+  "domain": [],
+  "function": [],
+  "technology": []
+}
+
+Rules:
+- Provide 2–4 terms per category.
+- Use technical synonyms.
+- Do not include explanations.
+- Return valid JSON only.

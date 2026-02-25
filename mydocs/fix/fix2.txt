@@ -1,0 +1,300 @@
+🎯 PART 1 — Clean Hybrid Formula (Mathematically Sound)
+
+Right now you are likely:
+Mixing raw cosine (0–1)
+Raw BM25 (unbounded)
+Then normalizing relative to max in batch
+
+That causes instability.
+
+We fix this properly.
+Step 1️⃣ Normalize BM25 Correctly
+BM25 scores are unbounded.
+Normalize using min-max scaling per batch:
+
+𝐵
+𝑀
+25
+𝑛
+𝑜
+𝑟
+𝑚
+=
+𝑏
+𝑚
+25
+−
+𝑚
+𝑖
+𝑛
+(
+𝑏
+𝑚
+25
+)
+𝑚
+𝑎
+𝑥
+(
+𝑏
+𝑚
+25
+)
+−
+𝑚
+𝑖
+𝑛
+(
+𝑏
+𝑚
+25
+)
+BM25
+norm
+	​
+
+=
+max(bm25)−min(bm25)
+bm25−min(bm25)
+	​
+Python:
+def normalize_bm25(scores):
+    min_s = min(scores)
+    max_s = max(scores)
+
+    if max_s == min_s:
+        return [0.0 for _ in scores]
+
+    return [(s - min_s) / (max_s - min_s) for s in scores]
+
+Now BM25 is in [0,1].
+
+Step 2️⃣ Keep Cosine As-Is
+Cosine similarity is already:
+
+0
+≤
+𝑐
+𝑜
+𝑠
+𝑖
+𝑛
+𝑒
+≤
+1
+0≤cosine≤1
+
+Do NOT normalize cosine relative to batch.
+Use raw cosine.
+
+Step 3️⃣ Clean Hybrid Formula
+For patent search, semantic similarity matters more than keyword match.
+
+Recommended weighting:
+
+𝐻
+𝑦
+𝑏
+𝑟
+𝑖
+𝑑
+=
+0.7
+×
+𝐶
+𝑜
+𝑠
+𝑖
+𝑛
+𝑒
++
+0.3
+×
+𝐵
+𝑀
+25
+𝑛
+𝑜
+𝑟
+𝑚
+Hybrid=0.7×Cosine+0.3×BM25
+norm
+
+Python:
+def hybrid_score(cosine, bm25_norm):
+    return 0.7 * cosine + 0.3 * bm25_norm
+
+Why 70/30?
+
+Cosine captures conceptual similarity
+BM25 captures exact term match
+Patents need both, but semantic matters more
+
+You can tune later.
+
+🎯 PART 2 — Cosine Threshold Logic (Clean & Defensible)
+This is critical.
+Without thresholding, irrelevant documents slip in.
+
+Recommended Threshold Strategy (PoC Level)
+Step 1 — Hard Floor
+
+Discard obviously weak matches:
+if cosine < 0.40:
+    discard
+
+Why 0.40?
+
+Empirical observation:
+<0.30 → unrelated
+0.30–0.40 → weak
+0.50 → meaningful
+0.65 → strong
+0.40 is a safe initial filter.
+
+Step 2 — Adaptive Threshold (Optional Advanced)
+If you want smarter filtering:
+mean_cos = np.mean(cosines)
+std_cos = np.std(cosines)
+
+threshold = mean_cos - 0.5 * std_cos
+
+But for PoC:
+👉 Use fixed threshold.
+
+Step 3 — Minimum Candidate Guarantee
+If after filtering you get <5 results:
+Lower threshold gradually to 0.35.
+Never drop below 0.30.
+
+🎯 Clean Ranking Pipeline
+Your new pipeline:
+
+# 1. Compute cosine
+# 2. Filter cosine < 0.40
+# 3. Normalize BM25
+# 4. Compute hybrid
+# 5. Sort descending
+# 6. Take top 10
+
+This guarantees:
+No garbage entries
+Stable hybrid math
+Transparent scoring
+
+🎯 PART 3 — Clean Input to Claude
+Now we define structured input format.
+Do NOT send raw CSV.
+Send structured comparison payload:
+
+{
+  "reference_claim": "...",
+  "candidate_patent": {
+    "patent_id": "...",
+    "title": "...",
+    "abstract": "...",
+    "cosine_score": 0.6727,
+    "hybrid_score": 0.81
+  }
+}
+
+Claude should NOT see 20 patents at once.
+
+Send one at a time.
+
+🎯 Claude Prompt — Novelty Risk Assessment
+Prompt 1 — Novelty Search
+You are a patent analysis assistant.
+
+Compare the reference claim with the candidate patent.
+
+Reference Claim:
+{reference_claim}
+
+Candidate Patent Title:
+{title}
+
+Candidate Patent Abstract:
+{abstract}
+
+Tasks:
+1. Identify overlapping technical elements.
+2. Identify missing elements from the candidate.
+3. Identify additional elements in the candidate.
+4. Assess similarity risk score (0-100).
+5. Classify novelty risk: Low / Medium / High.
+6. Provide reasoning.
+
+Return structured JSON.
+🎯 Additional Prompts for Different Use Cases
+🔎 Use Case 1 — Prior Art Invalidity Check
+Determine whether the candidate patent could invalidate the reference claim.
+
+Focus on:
+- Whether all key elements of the reference are disclosed.
+- Whether the combination of elements appears explicitly or implicitly.
+- Whether novelty is fully anticipated.
+
+Return:
+- Anticipation likelihood (0-100)
+- Explanation
+- Missing elements (if any)
+⚖ Use Case 2 — Infringement Risk Analysis
+Assume the reference claim is granted.
+
+Analyze whether implementing the candidate patent would likely infringe the reference claim.
+
+Focus on:
+- Element-by-element matching.
+- Doctrine of equivalents (functional similarity).
+- Structural vs functional differences.
+
+Return:
+- Infringement likelihood (0-100)
+- Explanation
+🧠 Use Case 3 — Technology Overlap Summary
+Summarize the technical overlap between the reference and candidate patent.
+
+Focus on:
+- Shared sensing technologies
+- Control systems
+- Hardware components
+- Signal processing methods
+
+Return:
+- Overlap summary (paragraph)
+- Degree of similarity (Low / Moderate / Strong)
+📊 Use Case 4 — Ranking Explanation Mode
+Explain why this candidate patent received a cosine similarity of {cosine}.
+
+Based on the texts, identify:
+- Which semantic concepts contributed most to similarity.
+- Whether the similarity is superficial or structural.
+
+This is excellent for management demo transparency.
+
+🎯 Final Clean Architecture Before Claude
+
+You now have:
+
+✔ Clean cosine threshold
+✔ Clean hybrid formula
+✔ Clean ranking
+✔ Clean candidate filtering
+✔ Structured Claude input
+✔ Multiple prompt modes
+
+You are now ready for LLM stage.
+
+🚀 What I Recommend Next
+
+Before enabling Claude:
+
+Apply cosine threshold 0.40
+
+Apply 70/30 hybrid
+
+Verify top 5 manually
+
+Only then run Claude on top 3
+

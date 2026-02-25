@@ -71,23 +71,135 @@ def hybrid_rank(
     return settings.cosine_weight * c + settings.bm25_weight * b
 
 
+def _apply_cosine_threshold(
+    cosine: np.ndarray,
+    indices: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    """
+    Filter *indices* to those whose cosine score meets the threshold.
+
+    Starts at ``settings.cosine_threshold`` (default 0.40) and relaxes
+    by 0.05 steps down to ``settings.cosine_threshold_min`` (default 0.30)
+    until at least ``settings.cosine_min_candidates`` candidates remain.
+
+    Returns:
+        (filtered_indices, threshold_used)
+    """
+    threshold = settings.cosine_threshold
+    floor     = settings.cosine_threshold_min
+    min_cands = settings.cosine_min_candidates
+
+    while threshold >= floor:
+        mask = cosine[indices] >= threshold
+        passing = indices[mask]
+        if len(passing) >= min_cands:
+            break
+        if threshold <= floor:
+            # Already at minimum — accept whatever we have.
+            break
+        prev = threshold
+        threshold = max(round(threshold - 0.05, 2), floor)
+        logger.warning(
+            "Cosine threshold relaxed: %.2f → %.2f (only %d candidates passed %.2f)",
+            prev, threshold, len(passing), prev,
+        )
+
+    final_mask = cosine[indices] >= threshold
+    filtered   = indices[final_mask]
+    discarded  = len(indices) - len(filtered)
+    logger.info(
+        "Cosine threshold %.2f applied: %d passed, %d discarded",
+        threshold, len(filtered), discarded,
+    )
+    return filtered, threshold
+
+
+def _apply_token_anchor_penalty(
+    hybrid: np.ndarray,
+    patents: list[PatentRecord],
+    critical_tokens: list[str],
+    penalty_factor: float = 0.5,
+) -> np.ndarray:
+    """
+    Multiply the hybrid score by *penalty_factor* for every patent whose
+    text (title + abstract) contains **none** of the *critical_tokens*.
+
+    *critical_tokens* should be the full anchor vocabulary built from ALL
+    extractor groups::
+
+        anchor_tokens = tokens.critical_tokens + tokens.patent_synonyms
+
+    This means a patent must contain at least one of:
+      - a surface term matched in the query (e.g. "camera", "pedestrian")
+      - a patent-vocabulary synonym (e.g. "imaging system", "visual sensor")
+
+    A patent about LADAR that shares only a single generic word will contain
+    none of these anchors and will be penalised down the list.
+
+    Args:
+        hybrid:          Array of hybrid scores, shape (n,).
+        patents:         List of PatentRecord objects aligned to *hybrid*.
+        critical_tokens: Combined anchor vocabulary (surface terms + synonyms).
+        penalty_factor:  Multiplier applied to off-domain patents (default 0.5).
+
+    Returns:
+        New score array with penalties applied (does not modify *hybrid* in-place).
+    """
+    if not critical_tokens:
+        return hybrid
+
+    anchors = [t.lower() for t in critical_tokens]
+    scores = hybrid.copy()
+
+    for i, patent in enumerate(patents):
+        text = (
+            (patent.patent_title or "") + " " + (patent.patent_abstract or "")
+        ).lower()
+        if not any(anchor in text for anchor in anchors):
+            scores[i] *= penalty_factor
+            logger.debug(
+                "Token anchor penalty applied to patent %s (factor=%.2f)",
+                patent.patent_id,
+                penalty_factor,
+            )
+
+    penalised = int(np.sum(scores != hybrid))
+    if penalised:
+        logger.info(
+            "Token anchor enforcement: %d/%d patents penalised (missing all anchors).",
+            penalised, len(patents),
+        )
+    return scores
+
+
 def rank(
     query: str,
     patents: list[PatentRecord],
     doc_vecs: np.ndarray,
     query_vec: np.ndarray,
     top_k: int | None = None,
+    critical_tokens: list[str] | None = None,
 ) -> list[RankedPatent]:
     """
     Rank *patents* using hybrid cosine + BM25 scoring.
 
+    Pipeline:
+      1. Compute raw cosine similarity for all candidates.
+      2. Apply cosine threshold (hard floor 0.40, relaxes to 0.30 to guarantee
+         at least ``settings.cosine_min_candidates`` results).
+      3. Normalise BM25 over the *filtered* candidate set only.
+      4. Compute hybrid = 0.7 * cosine + 0.3 * bm25_norm.
+      4b. Apply token anchor penalty (×0.5) to patents missing all domain anchors.
+      5. Sort descending, return top-k as RankedPatent objects.
+
     Args:
-        query:     Original (or expanded) query string — used for BM25.
-        patents:   List of PatentRecord objects aligned to *doc_vecs*.
-        doc_vecs:  L2-normalised embedding matrix, shape (n, dim).
-        query_vec: L2-normalised query embedding, shape (dim,).
-        top_k:     Return the top-k results only.  Defaults to
-                   ``settings.top_k_results`` when None.
+        query:           Original (or expanded) query string — used for BM25.
+        patents:         List of PatentRecord objects aligned to *doc_vecs*.
+        doc_vecs:        L2-normalised embedding matrix, shape (n, dim).
+        query_vec:       L2-normalised query embedding, shape (dim,).
+        top_k:           Maximum results to return. Defaults to settings.top_k_results.
+        critical_tokens: Mandatory domain tokens from the token extractor.
+                         Patents missing all of these receive a 0.5 score penalty.
 
     Returns:
         List of RankedPatent objects sorted by hybrid_score descending.
@@ -102,35 +214,91 @@ def rank(
         logger.warning("rank() called with no patents; returning empty list.")
         return []
 
-    # --- Cosine similarity (raw, already in [0, 1]) ---
+    # 1. Cosine similarity — raw, already in [0, 1] for L2-normalised vectors.
     cosine = cosine_similarity_matrix(query_vec, doc_vecs)
 
-    # --- BM25 (raw, unbounded) ---
-    bm25_raw = np.array(get_scores(build_index(patents), query), dtype=float)
+    # 2. Cosine threshold filter (with minimum-candidate guarantee).
+    all_indices = np.arange(len(patents))
+    keep_indices, threshold_used = _apply_cosine_threshold(cosine, all_indices)
 
-    # --- BM25 normalised to [0, 1] for both hybrid formula and display ---
+    if len(keep_indices) == 0:
+        logger.warning("All patents filtered out by cosine threshold; returning empty list.")
+        return []
+
+    # Subset everything to the passing candidates.
+    patents_f  = [patents[i] for i in keep_indices]
+    doc_vecs_f = doc_vecs[keep_indices]
+    cosine_f   = cosine[keep_indices]
+
+    # 3. BM25 over the filtered candidate set only.
+    bm25_raw = np.array(get_scores(build_index(patents_f), query), dtype=float)
+
+    # 4. Normalise BM25 over this filtered batch, then compute hybrid.
     bm25_norm = normalize(bm25_raw)
+    hybrid    = hybrid_rank(cosine_f, bm25_raw)   # hybrid_rank normalises BM25 internally
 
-    # --- Hybrid: raw cosine + normalised BM25 ---
-    hybrid = hybrid_rank(cosine, bm25_raw)   # hybrid_rank normalises BM25 internally
+    # 4b. Token anchor enforcement — penalise patents missing all domain anchors.
+    hybrid = _apply_token_anchor_penalty(hybrid, patents_f, critical_tokens or [])
 
-    # --- Sort and truncate ---
+    # 4c. Hybrid threshold filtering (hard filter). If settings.hybrid_threshold
+    # is > 0.0 we discard candidates whose hybrid score is below the threshold.
+    h_threshold = getattr(settings, "hybrid_threshold", 0.0)
+    if h_threshold and h_threshold > 0.0:
+        mask_h = hybrid >= h_threshold
+        passed = np.nonzero(mask_h)[0]
+        if len(passed) == 0:
+            logger.warning(
+                "No candidates passed hybrid threshold %.2f — returning empty list.",
+                h_threshold,
+            )
+            return []
+        # Subset arrays to those passing hybrid threshold
+        patents_f  = [patents_f[i] for i in passed]
+        cosine_f   = cosine_f[passed]
+        bm25_norm  = bm25_norm[passed]
+        hybrid     = hybrid[passed]
+
+    # 5. Sort descending and take top-k.
     sorted_idx = np.argsort(hybrid)[::-1][:k]
 
     ranked: list[RankedPatent] = []
     for i in sorted_idx:
         ranked.append(
             RankedPatent(
-                patent=patents[i],
-                cosine_score=float(cosine[i]),      # raw cosine in [0, 1]
+                patent=patents_f[i],
+                cosine_score=float(cosine_f[i]),    # raw cosine in [0, 1]
                 bm25_score=float(bm25_norm[i]),     # normalised BM25 in [0, 1]
                 hybrid_score=float(hybrid[i]),
             )
         )
 
     logger.info(
-        "Ranked %d patents → top-%d returned (best hybrid=%.4f)",
-        len(patents), len(ranked),
+        "rank() complete: %d input → %d passed threshold %.2f → top-%d returned "
+        "(best hybrid=%.4f)",
+        len(patents), len(patents_f), threshold_used, len(ranked),
         ranked[0].hybrid_score if ranked else 0.0,
     )
+
+    # Log a per-patent breakdown for the top-5 results.
+    # overlap_score = number of anchor tokens found in title+abstract.
+    anchors = [t.lower() for t in (critical_tokens or [])]
+    logger.info("─── Top-%d ranking breakdown ───", min(5, len(ranked)))
+    for pos, rp in enumerate(ranked[:5], start=1):
+        text = (
+            (rp.patent.patent_title or "") + " " + (rp.patent.patent_abstract or "")
+        ).lower()
+        overlap = sum(1 for a in anchors if a in text)
+        logger.info(
+            "  #%d  id=%-14s  cosine=%.4f  bm25=%.4f  overlap=%d/%d  hybrid=%.4f  | %s",
+            pos,
+            rp.patent.patent_id or "N/A",
+            rp.cosine_score,
+            rp.bm25_score,
+            overlap,
+            len(anchors),
+            rp.hybrid_score,
+            (rp.patent.patent_title or "")[:60],
+        )
+    logger.info("────────────────────────────────────")
+
     return ranked

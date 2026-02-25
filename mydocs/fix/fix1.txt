@@ -1,0 +1,15 @@
+You're right to flag this — the results are clearly wrong. Let me diagnose what's happening.
+What you're seeing:
+The top results are patents like "Coherent LADAR using intra-pixel quadrature detection", "3-D electrostatic printer", "Injection molding machine", "Sterile environment for additive manufacturing" — none of these are remotely related to autonomous vehicle lane detection.
+Root Cause Analysis:
+Looking at the patent IDs — 10000000, 10000001, 10000002, 10000003... 10000040 — these are sequential IDs starting from 10 million. This strongly suggests the search is returning the first page of the entire patent database rather than semantically matched results. The hybrid scores also confirm this: patent 10000000 scores a perfect 1.0000 hybrid, which is a dead giveaway of a ranking artifact, not a genuine match.
+Likely causes to check, in order:
+The first thing to verify is your query construction in search_service.py. The _or clause combining _text_any on title and abstract might be malformed, causing the API to ignore your query terms and return a default result set. Print the exact JSON payload being sent to the PatentsView API and confirm the query terms are actually present.
+The second thing to check is your BM25 indexing. If BM25 is being built on the wrong corpus — or the corpus is empty — the scores will be meaningless, and whichever patent happened to be first in the response will dominate the hybrid ranking. The 5.8415 BM25 score for rank 1 versus 0.7494 for rank 4 looks like BM25 is matching on generic stop words rather than domain terms.
+The third possibility is that your query expansion with Mistral 7B is generating poor alternative terms, causing the search to drift from the original domain entirely. Log the expanded_queries output (Step 2 in your tab navigation) and check what terms Mistral actually produced.
+Quick diagnostic steps:
+python# Add this temporarily to your pipeline to inspect the API payload
+print("Query sent to API:", json.dumps(params, indent=2))
+print("Expanded queries:", expanded_queries)
+print("First 3 raw results:", [p['patent_title'] for p in raw[:3]])
+Checking the "Search Results" tab (Step 2 in your UI) before ranking is applied would also immediately tell you whether the problem is upstream in search, or downstream in the ranking logic. If Step 2 already shows these same unrelated patents, the issue is in search_service.py. If Step 2 shows relevant patents that then get ranked incorrectly, the issue is in ranking_service.py.

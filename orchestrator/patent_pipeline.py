@@ -27,15 +27,80 @@ from models.mistral_client import MistralClient
 from models.schemas import PipelineResult, RankedPatent
 from services import (
     comparison_service,
+    constraint_validator,
     dedup_service,
     query_expansion,
     report_service,
 )
 from services import embedding_service, ranking_service
-from services.search_service import fetch_all_patents
+from services.query_builder import build_tiered_queries
+from services.search_service import fetch_patents_for_query_dict
 from storage.patent_repository import save_patents
 
 logger = logging.getLogger(__name__)
+
+# Minimum number of patents required from the broad tier before we consider
+# the search adequately seeded.  Below this threshold the pipeline still
+# continues — the narrow tiers may still contribute results.
+_MIN_RESULTS_THRESHOLD: int = 10
+
+
+def _execute_tiered_search(
+    original: str,
+    expanded: list[str],
+    tokens,
+    min_threshold: int = _MIN_RESULTS_THRESHOLD,
+) -> list:
+    """
+    Execute a broad → medium → narrow tiered patent search.
+
+    Each tier uses a different specificity level to balance recall (broad)
+    against precision (narrow).  All tiers run and their results are merged;
+    the broad tier guarantees at least *some* results even when the narrow
+    phrase queries match nothing in the PatentsView corpus.
+
+    Args:
+        original:      The raw user query string.
+        expanded:      Validated Mistral-expanded query strings.
+        tokens:        ExtractedTokens from the deterministic token extractor.
+        min_threshold: Informational threshold logged when the broad tier is
+                       already sufficient on its own.
+
+    Returns:
+        Combined list of PatentRecord objects from all tiers (pre-dedup).
+    """
+    tiers = build_tiered_queries(original, expanded, tokens)
+    all_patents: list = []
+
+    for tier in tiers:  # broad → medium → narrow
+        tier_results: list = []
+        for query_dict in tier.queries:
+            results = fetch_patents_for_query_dict(query_dict)
+            tier_results.extend(results)
+
+        logger.info(
+            "Tier '%s' returned %d patents (%s)",
+            tier.strategy,
+            len(tier_results),
+            tier.description,
+        )
+        all_patents.extend(tier_results)
+
+        if tier.strategy == "broad" and len(tier_results) >= min_threshold:
+            logger.info(
+                "Broad tier already reached threshold (%d); "
+                "medium/narrow will still run for precision boost.",
+                min_threshold,
+            )
+
+        if tier.strategy == "narrow" and len(tier_results) == 0:
+            logger.warning(
+                "Narrow tier returned 0 results — "
+                "broad/medium results will be used for ranking."
+            )
+
+    return all_patents
+
 
 # Module-level singletons — constructed once, reused for every pipeline call.
 # Construction is deferred to first use (lazy init) to keep import time low.
@@ -98,17 +163,28 @@ def run_pipeline(
     logger.info("Pipeline start: query='%s'", query)
 
     # ------------------------------------------------------------------
-    # Stage 1 — Query expansion
+    # Stage 1 — Query expansion (constrained by domain token anchors)
     # ------------------------------------------------------------------
-    expanded_queries = query_expansion.expand_query(query, mistral_client)
+    expanded_queries, tokens = query_expansion.expand_query(query, mistral_client)
     logger.info("Stage 1 done: %d queries (original + %d expanded)",
                 len(expanded_queries), len(expanded_queries) - 1)
 
     # ------------------------------------------------------------------
-    # Stage 2 — Patent search
+    # Stage 1b — Constraint validation (drop any query that lost the
+    #             domain anchor Mistral was given as a hard constraint)
     # ------------------------------------------------------------------
-    raw_patents = fetch_all_patents(expanded_queries)
-    logger.info("Stage 2 done: %d raw patents fetched", len(raw_patents))
+    validated_queries = constraint_validator.validate_queries(expanded_queries, tokens)
+    logger.info(
+        "Stage 1b done: %d/%d queries passed constraint validation",
+        len(validated_queries),
+        len(expanded_queries),
+    )
+
+    # ------------------------------------------------------------------
+    # Stage 2 — Tiered patent search (broad → medium → narrow)
+    # ------------------------------------------------------------------
+    raw_patents = _execute_tiered_search(query, validated_queries, tokens)
+    logger.info("Stage 2 done: %d raw patents fetched (tiered)", len(raw_patents))
 
     # ------------------------------------------------------------------
     # Stage 3 — Deduplication
@@ -128,20 +204,38 @@ def run_pipeline(
 
     # ------------------------------------------------------------------
     # Stage 4 — Embed patents + query
+    # Enrich the query embedding with all validated expansions so the
+    # vector is keyword-dense and aligns better with patent abstracts.
     # ------------------------------------------------------------------
     doc_vecs = embedding_service.embed_patents(patents, embed_model)
-    query_vec = embedding_service.embed_query(query, embed_model)
+    query_vec = embedding_service.embed_query(query, embed_model, expanded=validated_queries)
     logger.info("Stage 4 done: embedded %d patents (dim=%d)", len(patents), doc_vecs.shape[1])
 
     # ------------------------------------------------------------------
     # Stage 5 — Hybrid ranking
+    # Build a full anchor set from ALL extractor vocabulary groups:
+    #   critical_tokens  — surface terms matched in the query (e.g. "camera")
+    #   patent_synonyms  — patent vocabulary (e.g. "imaging system")
+    # Patents missing every anchor from this combined set receive a 0.5
+    # score penalty, pushing off-domain results (e.g. LADAR for a fintech
+    # query) below genuinely relevant patents.
     # ------------------------------------------------------------------
+    anchor_tokens: list[str] = list(
+        dict.fromkeys(tokens.critical_tokens + tokens.patent_synonyms)
+    )
+    logger.info(
+        "Stage 5 anchor set: %d tokens (%d critical + %d synonyms)",
+        len(anchor_tokens),
+        len(tokens.critical_tokens),
+        len(tokens.patent_synonyms),
+    )
     ranked: list[RankedPatent] = ranking_service.rank(
         query=query,
         patents=patents,
         doc_vecs=doc_vecs,
         query_vec=query_vec,
         top_k=k,
+        critical_tokens=anchor_tokens,
     )
     logger.info("Stage 5 done: %d patents ranked", len(ranked))
 

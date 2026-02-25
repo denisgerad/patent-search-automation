@@ -1,9 +1,15 @@
-You are a patent search expert. Given the search query below, generate 5 alternative
-technical search terms that would help find related patents. Consider synonyms,
-broader/narrower concepts, and different technical formulations.
+You are a patent search expert. Generate {n_expansions} queries with
+DIFFERENT STRUCTURAL FORMS — not just synonym swaps.
 
-Return ONLY a JSON array of strings — no explanation, no markdown, no extra text.
+MANDATORY: Each query must use a different structure from this list:
+1. APPARATUS: "System/apparatus/device for [function] using [technology]"
+2. METHOD: "Method for [function] comprising [technology] steps"
+3. COMPOUND: "[Technology]-based [function] in [domain]"
+4. CLAIM-STYLE: "[Technology] [domain] [function] system wherein..."
+5. KEYWORD-ONLY: 3-5 critical technical keywords only, no filler words
 
-Example output: ["term one", "term two", "term three", "term four", "term five"]
+ORIGINAL QUERY: {original_query}
+MANDATORY TOKENS (must appear in every query): {critical_tokens}
 
-Query: {query}
+Return ONLY a JSON array of {n_expansions} strings, one per structure type above, in order.
+No explanation. No markdown. No preamble.

@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
+    # API base URLs — override in .env if endpoints change
+    # ------------------------------------------------------------------
+    patentsview_api_url: str = "https://search.patentsview.org/api/v1/patent/"
+    lens_api_url: str = "https://api.lens.org/patent/search"
+
+    # ------------------------------------------------------------------
     # API keys — read from .env
     # ------------------------------------------------------------------
     patentsview_api_key: Optional[str] = None  # legacy PatentsView (now offline)

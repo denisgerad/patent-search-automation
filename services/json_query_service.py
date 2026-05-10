@@ -215,8 +215,8 @@ def fetch_result_count(schema: JsonQuerySchema) -> Optional[int]:
     Uses OR across all groups so the count reflects the total recall pool,
     not the strict AND intersection (which may be 0).
     Returns ``None`` on any network / API error (non-fatal — UI shows "unknown").
-    """"
-    url = "https://search.patentsview.org/api/v1/patent/"
+    """
+    url = settings.patentsview_api_url
     headers: dict = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json",

@@ -34,7 +34,7 @@ from utils.logger import get_logger  # noqa: E402
 
 log = get_logger(__name__)
 
-_LENS_URL = "https://api.lens.org/patent/search"
+_LENS_URL = settings.lens_api_url
 _PAGE_SIZE = 50   # Lens.org max per request on trial plan
 _MAX_RESULTS = 500
 

@@ -162,7 +162,7 @@ def _fetch_all_for_query(query: dict) -> list[PatentRecord]:
       - MAX_RESULTS documents have been collected, or
       - MAX_PAGES requests have been made.
     """
-    url = "https://search.patentsview.org/api/v1/patent/"
+    url = settings.patentsview_api_url
     headers = _build_headers()
 
     all_patents: list[PatentRecord] = []
@@ -362,7 +362,7 @@ def fetch_patents_by_keywords(
     list[PatentRecord]
     """
     # Use documented PatentsView endpoint
-    url = "https://search.patentsview.org/api/v1/patent/"  # noqa: F841 (kept for clarity)
+    url = settings.patentsview_api_url  # noqa: F841 (kept for clarity)
 
     # Build query using operator-first format per API docs
     or_clauses = []

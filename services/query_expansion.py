@@ -22,7 +22,7 @@ from pathlib import Path
 # Ensure the project root is importable regardless of the launch directory.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from models.mistral_client import MistralClient                # noqa: E402
+from models.claude_client import ClaudeClient                  # noqa: E402
 from services.token_extractor import (                         # noqa: E402
     ExtractedTokens,
     extract_critical_tokens,
@@ -39,7 +39,7 @@ PROMPT_TEMPLATE: str = load_prompt("query_expansion.txt")
 
 def expand_query(
     query: str,
-    client: MistralClient,
+    client: ClaudeClient,
     n_expansions: int = 5,
 ) -> tuple[list[str], ExtractedTokens]:
     """
@@ -74,9 +74,13 @@ def expand_query(
         n_expansions=n_expansions,
     )
 
-    logger.debug("Query expansion prompt sent to Mistral (query=%s)", query)
-    raw = client.generate(prompt)
-    logger.debug("Raw Mistral response: %s", raw)
+    logger.debug("Query expansion prompt sent to Claude (query=%s)", query)
+    raw = client.complete(
+        system="You are a patent search expert. Return only valid JSON arrays. No markdown, no explanation.",
+        user=prompt,
+        max_tokens=512,
+    )
+    logger.debug("Raw Claude response: %s", raw)
 
     try:
         expanded = json.loads(raw)
@@ -114,26 +118,27 @@ def expand_query(
             term_list = []
 
     all_queries = [query] + term_list
-    return all_queries, tokens
+    return all_queries, tokens, raw
 
 
 def expand_query_with_metadata(
     query: str,
-    client: MistralClient,
+    client: ClaudeClient,
 ) -> tuple[list[str], dict]:
     """
     Thin backward-compatibility wrapper used by the Streamlit UI.
 
     Returns:
         ``(expanded_queries, metadata_dict)`` where *metadata_dict* contains
-        the keys ``critical_tokens``, ``domain_concepts``, and
-        ``patent_synonyms`` extracted from
-        :class:`~services.token_extractor.ExtractedTokens`.
+        the keys ``critical_tokens``, ``domain_concepts``,
+        ``patent_synonyms``, and ``claude_raw_response`` (the verbatim
+        string returned by Claude, for UI validation).
     """
-    expanded, tokens = expand_query(query, client)
+    expanded, tokens, raw = expand_query(query, client)
     metadata: dict = {
         "critical_tokens": tokens.critical_tokens,
         "domain_concepts": tokens.domain_concepts,
         "patent_synonyms": tokens.patent_synonyms,
+        "claude_raw_response": raw,
     }
     return expanded, metadata

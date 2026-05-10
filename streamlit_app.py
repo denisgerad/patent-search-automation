@@ -44,6 +44,7 @@ st.set_page_config(
 _DEFAULTS = {
     "expanded_queries": [],
     "expansion_metadata": {},
+    "claude_raw_response": "",
     "expansion_evaluation": {},
     "raw_patents": [],
     "unique_patents": [],
@@ -74,16 +75,26 @@ with st.sidebar:
     st.title("⚙️ Configuration")
 
     st.divider()
+    st.subheader("🔍 Search Backend")
+    _backend_name = settings.search_backend.lower()
+    if _backend_name == "lens" and settings.lens_api_token:
+        st.success("Lens.org API ✅")
+    elif _backend_name == "lens" and not settings.lens_api_token:
+        st.warning("Lens.org — token missing\nAdd `lens_api_token=` to .env")
+    else:
+        st.info("Offline fixture data\n_(add lens_api_token to .env for live search)_")
+
+    st.divider()
     st.subheader("🤖 Active Models")
-    st.caption(f"**Query Expansion:** {settings.mistral_model}")
+    st.caption(f"**Query Expansion:** claude-sonnet-4 (API)")
     st.caption(f"**Embeddings:** {settings.embedding_model}")
 
     st.divider()
     top_k = st.number_input("Top-K results", min_value=1, max_value=100, value=20)
 
     st.divider()
-    st.subheader("Ollama / Mistral")
-    use_mistral = st.toggle("Use Mistral for query expansion", value=True)
+    st.subheader("Claude API")
+    use_mistral = st.toggle("Use Claude for query expansion", value=True)
 
     st.divider()
     st.subheader("Pipeline stages")
@@ -229,16 +240,27 @@ def _queries_from_json(raw: str) -> list[str]:
 def _run_expand(q: str) -> tuple[list[str], dict]:
     """Expand query and return (expanded_queries, structured_metadata)."""
     if use_mistral:
-        from models.mistral_client import MistralClient
+        from models.claude_client import ClaudeClient
         from services.query_expansion import expand_query_with_metadata
-        client = MistralClient()
-        return expand_query_with_metadata(q, client)
+        client = ClaudeClient()
+        expanded, metadata = expand_query_with_metadata(q, client)
+        st.session_state.claude_raw_response = metadata.get("claude_raw_response", "")
+        return expanded, metadata
     return [q], {}
 
 
 def _run_search(queries: list[str]) -> tuple[list, list]:
-    from services.search_service import fetch_all_patents
     from services.dedup_service import deduplicate
+    backend = settings.search_backend.lower()
+
+    if backend == "lens" and settings.lens_api_token:
+        from services.lens_search_service import fetch_all_patents
+    elif backend == "patentsview":
+        from services.search_service import fetch_all_patents
+    else:
+        # fallback to fixture if no API token is configured
+        from services.fixture_search_service import fetch_all_patents
+
     raw = fetch_all_patents(queries)
     unique = deduplicate(raw)
     return raw, unique
@@ -253,6 +275,28 @@ def _run_rank(q: str, patents: list, k: int) -> list:
     query_vec = embed_query(q, em)
     return rank(query=q, patents=patents, doc_vecs=doc_vecs,
                 query_vec=query_vec, top_k=k)
+
+
+def _run_search_json(schema) -> tuple[list, list]:
+    """
+    Search by sending each group as a separate OR query to PatentsView,
+    then merge + dedup. High recall at search time; ranking handles precision.
+    (Mirrors the pipeline's existing query_builder.py philosophy.)
+    """
+    from services.json_query_service import build_patentsview_query, JsonQuerySchema, TermGroup
+    from services.search_service import fetch_patents_for_query_dict
+    from services.dedup_service import deduplicate
+
+    all_raw = []
+    for group in schema.groups:
+        # Send each group as a standalone OR query
+        single_group_schema = JsonQuerySchema(groups=[group], combine_with="OR")
+        query_dict = build_patentsview_query(single_group_schema)
+        results = fetch_patents_for_query_dict(query_dict)
+        all_raw.extend(results)
+
+    unique = deduplicate(all_raw)
+    return all_raw, unique
 
 
 def _run_claude(q: str, ranked: list) -> tuple[str, str]:
@@ -324,7 +368,6 @@ if run_to_top20 and query.strip():
                     build_boolean_string as _bbs,
                     build_patentsview_query as _bpq,
                     build_uspto_url as _buu,
-                    fetch_result_count as _frc,
                 )
                 _schema    = _vjq(_active_json)
                 _bool_str  = _bbs(_schema)
@@ -335,9 +378,17 @@ if run_to_top20 and query.strip():
                 logger.info("JSON Boolean query: %s", _bool_str)
                 logger.info("JSON expansion terms (%d): %s", len(expanded), expanded)
 
-            # Fetch PatentsView count in a second spinner (network call)
-            with st.spinner("Fetching result count from PatentsView…"):
-                _count = _frc(_schema)
+            # Fetch result count from whichever backend is active
+            with st.spinner("Fetching result count…"):
+                _backend = settings.search_backend.lower()
+                if _backend == "lens" and settings.lens_api_token:
+                    from services.lens_search_service import fetch_result_count as _lens_count
+                    _count = _lens_count(
+                        [g.terms for g in _schema.groups],
+                        _schema.combine_with,
+                    )
+                else:
+                    _count = None  # fixture / patentsview offline
 
             st.session_state.json_boolean      = _bool_str
             st.session_state.json_uspto_url    = _uspto_url
@@ -364,8 +415,12 @@ if run_to_top20 and query.strip():
         st.session_state.stage = 1
 
         # Stage 2 — search + dedup
-        with st.spinner(f"Stage 2/3 — Searching PatentsView for {len(expanded)} queries…"):
-            raw, unique = _timed("2. Search + dedup", _run_search, expanded)
+        if _use_json_expansion:
+            with st.spinner(f"Stage 2/3 — Searching PatentsView with structured JSON query…"):
+                raw, unique = _timed("2. Search + dedup", _run_search_json, _schema)
+        else:
+            with st.spinner(f"Stage 2/3 — Searching PatentsView for {len(expanded)} queries…"):
+                raw, unique = _timed("2. Search + dedup", _run_search, expanded)
         st.session_state.raw_patents   = raw
         st.session_state.unique_patents = unique
         st.session_state.stage = 2
@@ -449,13 +504,17 @@ with tab_expand:
             for t in st.session_state.expanded_queries:
                 st.markdown(f"- `{t}`")
 
-        # ── Mistral expansion mode panel ────────────────────────────────────
+        # ── Claude expansion mode panel ────────────────────────────────────
         else:
             st.success(f"{len(st.session_state.expanded_queries)} queries generated"
-                       + (" (incl. original)" if use_mistral else " (Mistral disabled)"))
+                       + (" (incl. original)" if use_mistral else " (Claude disabled)"))
             for i, q in enumerate(st.session_state.expanded_queries):
                 label = "🔵 Original" if i == 0 else f"🟢 Expanded {i}"
                 st.markdown(f"**{label}:** {q}")
+
+            if st.session_state.claude_raw_response:
+                with st.expander("🔍 Raw Claude response (for validation)", expanded=False):
+                    st.code(st.session_state.claude_raw_response, language="json")
 
         # Quality scoring temporarily disabled — focus on top-10 relevance.
         # To re-enable: restore the `if st.session_state.expansion_evaluation:` block.

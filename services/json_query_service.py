@@ -210,10 +210,12 @@ def build_uspto_url(boolean_str: str) -> str:
 
 def fetch_result_count(schema: JsonQuerySchema) -> Optional[int]:
     """
-    Fire a single size=1 request to PatentsView and return ``total_patent_count``.
+    Fire a single size=1 request to PatentsView and return ``total_hits``.
 
+    Uses OR across all groups so the count reflects the total recall pool,
+    not the strict AND intersection (which may be 0).
     Returns ``None`` on any network / API error (non-fatal — UI shows "unknown").
-    """
+    """"
     url = "https://search.patentsview.org/api/v1/patent/"
     headers: dict = {
         "User-Agent": "Mozilla/5.0",
@@ -223,7 +225,10 @@ def fetch_result_count(schema: JsonQuerySchema) -> Optional[int]:
     if settings.patentsview_api_key:
         headers["X-Api-Key"] = settings.patentsview_api_key
 
-    query_dict = build_patentsview_query(schema)
+    # Use OR across all groups for the count — shows the total recall pool size.
+    # AND would return 0 or near-0 (too strict); OR gives a meaningful number.
+    or_schema = JsonQuerySchema(groups=schema.groups, combine_with="OR")
+    query_dict = build_patentsview_query(or_schema)
     params = {
         "q": query_dict,
         "f": ["patent_id"],          # minimal field set → fast response
@@ -240,7 +245,7 @@ def fetch_result_count(schema: JsonQuerySchema) -> Optional[int]:
             )
             return None
         data = resp.json()
-        count = data.get("total_patent_count")
+        count = data.get("total_hits")
         if count is not None:
             log.info("PatentsView total count: %s", count)
             return int(count)

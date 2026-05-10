@@ -7,14 +7,16 @@ No prompt logic lives here — prompts are owned by the calling service.
 """
 import anthropic
 
+from app.config import settings
+
 
 class ClaudeClient:
     """Calls Anthropic Claude via the official SDK."""
 
-    def __init__(self, model: str = "claude-3-5-sonnet-20241022", max_tokens: int = 4096):
-        # Anthropic() automatically reads ANTHROPIC_API_KEY from the environment
-        # (loaded by load_dotenv() in config.py at app startup).
-        self.client = anthropic.Anthropic()
+    def __init__(self, model: str = "claude-sonnet-4-20250514", max_tokens: int = 4096):
+        # Pass the key explicitly from settings so it works regardless of whether
+        # ANTHROPIC_API_KEY is set as an OS environment variable.
+        self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
         self.model = model
         self.max_tokens = max_tokens
 

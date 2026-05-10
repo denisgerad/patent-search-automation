@@ -23,7 +23,6 @@ from pathlib import Path
 from app.config import settings
 from models.claude_client import ClaudeClient
 from models.embedding_model import EmbeddingModel
-from models.mistral_client import MistralClient
 from models.schemas import PipelineResult, RankedPatent
 from services import (
     comparison_service,
@@ -104,15 +103,15 @@ def _execute_tiered_search(
 
 # Module-level singletons — constructed once, reused for every pipeline call.
 # Construction is deferred to first use (lazy init) to keep import time low.
-_mistral: MistralClient | None = None
+_mistral: ClaudeClient | None = None
 _embedding: EmbeddingModel | None = None
 _claude: ClaudeClient | None = None
 
 
-def _get_mistral() -> MistralClient:
+def _get_mistral() -> ClaudeClient:
     global _mistral
     if _mistral is None:
-        _mistral = MistralClient(model=settings.mistral_model)
+        _mistral = ClaudeClient()
     return _mistral
 
 
@@ -133,7 +132,7 @@ def _get_claude() -> ClaudeClient:
 def run_pipeline(
     query: str,
     *,
-    mistral: MistralClient | None = None,
+    mistral: ClaudeClient | None = None,
     embedding_model: EmbeddingModel | None = None,
     claude: ClaudeClient | None = None,
     top_k: int | None = None,
@@ -165,7 +164,7 @@ def run_pipeline(
     # ------------------------------------------------------------------
     # Stage 1 — Query expansion (constrained by domain token anchors)
     # ------------------------------------------------------------------
-    expanded_queries, tokens = query_expansion.expand_query(query, mistral_client)
+    expanded_queries, tokens, _ = query_expansion.expand_query(query, mistral_client)
     logger.info("Stage 1 done: %d queries (original + %d expanded)",
                 len(expanded_queries), len(expanded_queries) - 1)
 

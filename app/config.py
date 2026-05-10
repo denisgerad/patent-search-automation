@@ -48,8 +48,17 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # API keys — read from .env
     # ------------------------------------------------------------------
-    patentsview_api_key: str
-    anthropic_api_key: Optional[str] = None  # set when Claude analysis is enabled
+    patentsview_api_key: Optional[str] = None  # legacy PatentsView (now offline)
+    lens_api_token: Optional[str] = None        # Lens.org Patent API bearer token
+    anthropic_api_key: Optional[str] = None     # set when Claude analysis is enabled
+
+    # ------------------------------------------------------------------
+    # Search backend selection
+    # ------------------------------------------------------------------
+    # "lens"    — Lens.org Patent API (requires lens_api_token)
+    # "fixture" — offline fixture data (for testing / demo without an API)
+    # "patentsview" — legacy (offline as of March 2026, kept for reference)
+    search_backend: str = "fixture"  # default to fixture until API token is set
 
     # ------------------------------------------------------------------
     # Model selection
@@ -156,7 +165,7 @@ PATENT_PAGE_SIZE = 1000
 # Maximum total patent documents to return across all pages.
 # The user is notified when this cap is reached.
 # Set to None to disable the document cap.
-MAX_RESULTS = 5          # ← change to allow more documents
+MAX_RESULTS = 500        # raised from 5 (was a debug POC limit)
 
 # Maximum number of API pages (requests) per query.
 # Set to None to disable the page cap.

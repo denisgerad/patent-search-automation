@@ -140,3 +140,47 @@ class VectorStore:
         self._matrix = data["matrix"] if data["matrix"].ndim == 2 else None
         logger.info("VectorStore loaded: %s (%d vectors)", path, len(self._ids))
         return True
+
+    # ------------------------------------------------------------------
+    # Cache-aware helpers (Fix B from fix_embeddings1.txt)
+    # The vector store is an EMBEDDING CACHE only — never the search corpus.
+    # The patent corpus always comes from search_service live results.
+    # ------------------------------------------------------------------
+
+    def store_embeddings(
+        self,
+        patents: list,
+        embeddings: np.ndarray,
+    ) -> None:
+        """Cache *embeddings* keyed by patent_id. Alias for add()."""
+        ids = [p.patent_id for p in patents]
+        self.add(ids, embeddings)
+
+    def get_cached_embeddings(
+        self,
+        patents: list,
+    ) -> tuple[list, list, np.ndarray]:
+        """
+        Split *patents* into those with cached embeddings and those without.
+
+        Returns:
+            (cached_patents, uncached_patents, cached_vecs_matrix)
+            cached_vecs_matrix has shape (len(cached_patents), dim) or (0,).
+        """
+        id_to_idx = {pid: i for i, pid in enumerate(self._ids)}
+
+        cached_patents, uncached_patents, cached_vecs = [], [], []
+        for p in patents:
+            idx = id_to_idx.get(p.patent_id)
+            if idx is not None and self._matrix is not None:
+                cached_patents.append(p)
+                cached_vecs.append(self._matrix[idx])
+            else:
+                uncached_patents.append(p)
+
+        if cached_vecs:
+            matrix = np.array(cached_vecs, dtype=np.float32)
+        else:
+            matrix = np.empty((0,), dtype=np.float32)
+
+        return cached_patents, uncached_patents, matrix

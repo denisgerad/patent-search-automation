@@ -58,12 +58,18 @@ class Settings(BaseSettings):
     lens_api_token: Optional[str] = None        # Lens.org Patent API bearer token
     anthropic_api_key: Optional[str] = None     # set when Claude analysis is enabled
 
+    # EPO Open Patent Services (OPS) credentials
+    epo_consumer_key: Optional[str] = None
+    epo_consumer_secret: Optional[str] = None
+    epo_api_url: str = "https://ops.epo.org/3.2/rest-services"
+
     # ------------------------------------------------------------------
     # Search backend selection
     # ------------------------------------------------------------------
     # "lens"    — Lens.org Patent API (requires lens_api_token)
     # "fixture" — offline fixture data (for testing / demo without an API)
     # "patentsview" — legacy (offline as of March 2026, kept for reference)
+    # "epo"     — EPO Open Patent Services (requires epo_consumer_key + epo_consumer_secret)
     search_backend: str = "fixture"  # default to fixture until API token is set
 
     # ------------------------------------------------------------------
@@ -89,14 +95,15 @@ class Settings(BaseSettings):
 
     # Cosine threshold: patents scoring below this are discarded before ranking.
     # Empirical scale:  <0.30 unrelated | 0.30–0.40 weak | 0.50 meaningful | 0.65 strong
+    # Recommended: 0.65–0.80 for semantic-only or hybrid BM25+embedding
     # Set to 0.0 in .env to disable filtering entirely.
-    cosine_threshold: float = 0.45       # hard floor (PoC default)
+    cosine_threshold: float = 0.70       # recommended midpoint for hybrid/semantic
     cosine_threshold_min: float = 0.30   # never drop below this when auto-relaxing
     cosine_min_candidates: int = 5       # guarantee at least this many pass the filter
 
     # Hybrid threshold: require a minimum hybrid score for final candidates.
     # Set to 0.0 in .env to disable hybrid filtering entirely.
-    hybrid_threshold: float = 0.45
+    hybrid_threshold: float = 0.65
 
     # ------------------------------------------------------------------
     # MySQL database credentials (read from .env)
@@ -145,6 +152,17 @@ class Settings(BaseSettings):
         "patent_type",
         "patent_date",
     ]
+
+    @field_validator("patentsview_api_url")
+    @classmethod
+    def _must_be_patentsview(cls, v: str) -> str:
+        """Fail fast if the PatentsView URL has been overridden to a wrong host."""
+        if v and "patentsview.org" not in v:
+            raise ValueError(
+                f"Unexpected patentsview_api_url: {v!r}. "
+                "Must contain 'patentsview.org'."
+            )
+        return v
 
     @field_validator("bm25_weight", "cosine_weight")
     @classmethod

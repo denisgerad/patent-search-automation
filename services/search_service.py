@@ -153,6 +153,36 @@ def build_token_aware_query(critical_tokens: list[str]) -> dict:
     return {"_and": and_clauses}
 
 
+def _validate_patent_record(raw: dict) -> bool:
+    """
+    Reject records that have no usable text content or non-USPTO IDs.
+
+    PatentsView only contains USPTO patents with purely numeric IDs.
+    Records with FR/FI/EP-format IDs indicate wrong API routing.
+    Records whose title equals the publication number have no real content.
+    """
+    patent_id = raw.get("patent_id", "") or ""
+    title     = raw.get("patent_title", "") or ""
+    abstract  = raw.get("patent_abstract", "") or ""
+
+    # Reject non-numeric IDs (PatentsView IDs are always numeric)
+    if patent_id and not patent_id.replace("-", "").isdigit():
+        log.warning("Non-USPTO patent_id rejected (wrong API?): %s", patent_id)
+        return False
+
+    # Reject records where the title is just the publication number
+    if title and patent_id and (title.strip() == patent_id or title.startswith(patent_id[:4])):
+        log.warning("Title looks like publication number, rejected: %s", title)
+        return False
+
+    # Reject records with no searchable text at all
+    if not title.strip() and not abstract.strip():
+        log.warning("No text content in record: %s", patent_id)
+        return False
+
+    return True
+
+
 def _fetch_all_for_query(query: dict) -> list[PatentRecord]:
     """Paginate the PatentsView API for *query* and return PatentRecord objects.
 
@@ -254,6 +284,8 @@ def _fetch_all_for_query(query: dict) -> list[PatentRecord]:
             # Convert raw dicts → PatentRecord objects; skip invalid records.
             page_records: list[PatentRecord] = []
             for raw in raw_page:
+                if not _validate_patent_record(raw):
+                    continue
                 try:
                     page_records.append(PatentRecord(**raw))
                 except Exception as exc:
@@ -345,6 +377,77 @@ def fetch_all_patents(query_terms: list[str]) -> list[PatentRecord]:
         )
     log.info("fetch_all_patents complete", extra={"total": len(all_patents)})
     return all_patents
+
+
+def fetch_patents_with_fallback(
+    tokens,
+    validated_queries: list[str],
+    min_results: int = 15,
+) -> list[PatentRecord]:
+    """
+    Three-stage search with progressively broader queries.
+
+    Only advances to the next stage when the running total is below
+    *min_results*, so the narrowest query that yields enough results wins.
+
+    Stage 1 — validated Mistral-expanded queries (phrase-level)
+    Stage 2 — individual critical tokens via _text_any (no phrase match)
+    Stage 3 — domain concept single-word fallback (maximum recall)
+
+    Args:
+        tokens:           ExtractedTokens from the token extractor.
+        validated_queries: Validated expanded query strings.
+        min_results:      Threshold below which the next stage runs.
+
+    Returns:
+        Combined list of PatentRecord objects (pre-dedup).
+    """
+    results: list[PatentRecord] = []
+    seen_ids: set[str] = set()
+
+    def _add(batch: list[PatentRecord]) -> None:
+        for p in batch:
+            if p.patent_id not in seen_ids:
+                seen_ids.add(p.patent_id)
+                results.append(p)
+
+    # Stage 1: phrase-level expanded queries
+    log.info("Search fallback stage 1: %d expanded queries", len(validated_queries))
+    stage1 = fetch_all_patents(validated_queries)
+    _add(stage1)
+    log.info("Stage 1: %d unique patents", len(results))
+    if len(results) >= min_results:
+        return results
+
+    # Stage 2: individual critical tokens (_text_any — no phrase match)
+    log.info("Search fallback stage 2: %d critical tokens", len(tokens.critical_tokens))
+    for token in tokens.critical_tokens[:4]:
+        query_dict = {
+            "_or": [
+                {"_text_any": {"patent_title": token}},
+                {"_text_any": {"patent_abstract": token}},
+            ]
+        }
+        batch = fetch_patents_for_query_dict(query_dict)
+        _add(batch)
+        log.info("Stage 2 token='%s': +%d (total %d)", token, len(batch), len(results))
+        if len(results) >= min_results:
+            return results
+
+    if len(results) >= min_results:
+        return results
+
+    # Stage 3: domain concept single-word fallback
+    log.info("Search fallback stage 3: domain concept fallback")
+    for concept in tokens.domain_concepts[:2]:
+        term = concept.replace("_", " ")
+        query_dict = {"_text_any": {"patent_abstract": term}}
+        batch = fetch_patents_for_query_dict(query_dict)
+        _add(batch)
+        log.info("Stage 3 concept='%s': +%d (total %d)", concept, len(batch), len(results))
+
+    log.info("Search fallback complete: %d unique patents", len(results))
+    return results
 
 
 def fetch_patents_by_keywords(

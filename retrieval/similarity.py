@@ -2,16 +2,20 @@
 retrieval/similarity.py
 
 Vectorised cosine similarity between a query embedding and a matrix of
-document embeddings.
+document embeddings, plus dynamic threshold computation.
 
 IMPORTANT: Both inputs must already be L2-normalised before calling these
-functions. EmbeddingModel.embed() always returns normalised vectors, so no
-extra normalisation step is required here.
+functions. EmbeddingModel.embed_documents() and embed_query() always return
+normalised vectors, so no extra normalisation step is required here.
 
 With unit vectors, cosine similarity reduces to a dot product, which numpy
 computes as a single BLAS call — no looping, no per-pair computation.
 """
+import logging
+
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 def cosine_similarity_matrix(
@@ -54,3 +58,71 @@ def top_k_indices(scores: np.ndarray, k: int) -> np.ndarray:
     top = np.argpartition(scores, -k)[-k:]
     # Sort the small top-k slice for deterministic ordering
     return top[np.argsort(scores[top])[::-1]]
+
+
+def compute_dynamic_threshold(
+    scores: np.ndarray,
+    strategy: str = "mean_plus_std",
+) -> float:
+    """
+    Compute a data-driven threshold rather than using a fixed value.
+
+    Strategies:
+    - mean_plus_std : mean + 0.5*std  (keeps top ~30% typically)
+    - top_k_pct     : score at 80th percentile
+    - elbow         : finds the sharpest drop in sorted scores
+
+    Args:
+        scores:   1-D array of similarity / hybrid scores.
+        strategy: One of "mean_plus_std", "top_k_pct", "elbow".
+
+    Returns:
+        Float threshold value.  Returns 0.0 for empty input.
+    """
+    if len(scores) == 0:
+        return 0.0
+
+    if strategy == "mean_plus_std":
+        threshold = float(np.mean(scores) + 0.5 * np.std(scores))
+
+    elif strategy == "top_k_pct":
+        threshold = float(np.percentile(scores, 80))
+
+    elif strategy == "elbow":
+        sorted_scores = np.sort(scores)[::-1]
+        if len(sorted_scores) < 2:
+            return float(sorted_scores[0])
+        diffs = np.diff(sorted_scores)
+        elbow_idx = int(np.argmin(diffs))  # sharpest drop
+        threshold = float(sorted_scores[elbow_idx])
+
+    else:
+        threshold = 0.45  # fallback
+
+    logger.info(
+        "Dynamic threshold computed: strategy=%s threshold=%.4f mean=%.4f std=%.4f max=%.4f",
+        strategy,
+        round(threshold, 4),
+        round(float(np.mean(scores)), 4),
+        round(float(np.std(scores)), 4),
+        round(float(np.max(scores)), 4),
+    )
+    return threshold
+
+
+def filter_by_threshold(
+    scores: np.ndarray,
+    threshold: float,
+) -> np.ndarray:
+    """
+    Return indices of entries in *scores* that are >= *threshold*, sorted descending.
+
+    Args:
+        scores:    1-D score array.
+        threshold: Minimum score to keep.
+
+    Returns:
+        Integer index array sorted by score descending.
+    """
+    above = np.where(scores >= threshold)[0]
+    return above[np.argsort(scores[above])[::-1]]

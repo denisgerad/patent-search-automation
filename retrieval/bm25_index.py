@@ -44,11 +44,16 @@ def _patent_to_tokens(patent: Union[dict, object]) -> list[str]:
     if isinstance(patent, dict):
         title    = patent.get("patent_title") or ""
         abstract = patent.get("patent_abstract") or ""
+        pid      = patent.get("patent_id", "")
     else:
         title    = getattr(patent, "patent_title", "") or ""
         abstract = getattr(patent, "patent_abstract", "") or ""
+        pid      = getattr(patent, "patent_id", "") or ""
 
     text = f"{title} {abstract}".lower().strip()
+    if not text:
+        # Prevent empty token list crash in BM25Okapi
+        text = f"patent {pid}"
     return text.split()  # ← swap this line for a richer tokeniser if needed
 
 

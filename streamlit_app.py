@@ -253,7 +253,9 @@ def _run_search(queries: list[str]) -> tuple[list, list]:
     from services.dedup_service import deduplicate
     backend = settings.search_backend.lower()
 
-    if backend == "lens" and settings.lens_api_token:
+    if backend == "epo" and settings.epo_consumer_key:
+        from services.epo_search_service import fetch_all_patents
+    elif backend == "lens" and settings.lens_api_token:
         from services.lens_search_service import fetch_all_patents
     elif backend == "patentsview":
         from services.search_service import fetch_all_patents
@@ -272,9 +274,16 @@ def _run_rank(q: str, patents: list, k: int) -> list:
     from services.ranking_service import rank
     em = EmbeddingModel()
     doc_vecs = embed_patents(patents, em)
-    query_vec = embed_query(q, em)
+    # Pass expanded queries so embed_query applies BGE prefix + expansion enrichment
+    expanded = st.session_state.get("expanded_queries", None)
+    query_vec = embed_query(q, em, expanded=expanded)
+    # Pass critical_tokens + synonyms for anchor penalty
+    meta = st.session_state.get("expansion_metadata", {})
+    critical = list(dict.fromkeys(
+        meta.get("critical_tokens", []) + meta.get("patent_synonyms", [])
+    ))
     return rank(query=q, patents=patents, doc_vecs=doc_vecs,
-                query_vec=query_vec, top_k=k)
+                query_vec=query_vec, top_k=k, critical_tokens=critical or None)
 
 
 def _run_search_json(schema) -> tuple[list, list]:

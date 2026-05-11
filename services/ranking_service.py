@@ -240,23 +240,22 @@ def rank(
     # 4b. Token anchor enforcement — penalise patents missing all domain anchors.
     hybrid = _apply_token_anchor_penalty(hybrid, patents_f, critical_tokens or [])
 
-    # 4c. Hybrid threshold filtering (hard filter). If settings.hybrid_threshold
-    # is > 0.0 we discard candidates whose hybrid score is below the threshold.
-    h_threshold = getattr(settings, "hybrid_threshold", 0.0)
-    if h_threshold and h_threshold > 0.0:
-        mask_h = hybrid >= h_threshold
-        passed = np.nonzero(mask_h)[0]
-        if len(passed) == 0:
-            logger.warning(
-                "No candidates passed hybrid threshold %.2f — returning empty list.",
-                h_threshold,
-            )
-            return []
-        # Subset arrays to those passing hybrid threshold
-        patents_f  = [patents_f[i] for i in passed]
-        cosine_f   = cosine_f[passed]
-        bm25_norm  = bm25_norm[passed]
-        hybrid     = hybrid[passed]
+    # 4c. Dynamic threshold on hybrid scores — replaces fixed settings.hybrid_threshold.
+    # Uses the "elbow" strategy (sharpest score drop) so the cutoff adapts to
+    # each result set rather than applying a calibration-free fixed value.
+    from retrieval.similarity import compute_dynamic_threshold, filter_by_threshold
+    dyn_threshold = compute_dynamic_threshold(hybrid, strategy="elbow")
+    passed = filter_by_threshold(hybrid, dyn_threshold)
+    if len(passed) == 0:
+        logger.warning(
+            "No candidates passed dynamic hybrid threshold %.4f — returning empty list.",
+            dyn_threshold,
+        )
+        return []
+    patents_f = [patents_f[i] for i in passed]
+    cosine_f  = cosine_f[passed]
+    bm25_norm = bm25_norm[passed]
+    hybrid    = hybrid[passed]
 
     # 5. Sort descending and take top-k.
     sorted_idx = np.argsort(hybrid)[::-1][:k]

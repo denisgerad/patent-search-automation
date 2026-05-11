@@ -24,10 +24,27 @@ logger = logging.getLogger(__name__)
 
 
 def _patent_to_text(patent: PatentRecord) -> str:
-    """Combine title and abstract into a single embeddable string."""
-    title = patent.patent_title or ""
-    abstract = patent.patent_abstract or ""
-    return f"{title} {abstract}".strip()
+    """
+    Concatenate title + abstract for embedding.
+    Title is repeated twice to give it higher weight in the embedding;
+    abstract contains the technical substance so both are required.
+    """
+    title = (patent.patent_title or "").strip()
+    abstract = (patent.patent_abstract or "").strip()
+
+    if not title and not abstract:
+        logger.warning(
+            "Patent %s has no text content — embedding will be noise",
+            patent.patent_id,
+        )
+        return f"patent {patent.patent_id}"  # minimal placeholder
+
+    if not abstract:
+        logger.debug("Patent %s has no abstract — using doubled title", patent.patent_id)
+        return f"{title}. {title}"  # double title as weight fallback
+
+    # Repeat title to boost its weight in the resulting vector
+    return f"{title}. {title}. {abstract}"
 
 
 def embed_patents(
@@ -55,7 +72,7 @@ def embed_patents(
     texts = [_patent_to_text(p) for p in patents]
     logger.info("Embedding %d patent(s).", len(texts))
 
-    vecs = model.embed(texts)
+    vecs = model.embed_documents(texts)
 
     if store is not None:
         ids = [p.patent_id for p in patents]
@@ -109,5 +126,4 @@ def embed_query(
     else:
         enriched = query
 
-    vecs = model.embed([enriched])
-    return vecs[0]
+    return model.embed_query(enriched)

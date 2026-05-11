@@ -32,8 +32,9 @@ from services import (
     report_service,
 )
 from services import embedding_service, ranking_service
+from services.relevance_filter import filter_irrelevant_patents
 from services.query_builder import build_tiered_queries
-from services.search_service import fetch_patents_for_query_dict
+from services.search_service import fetch_patents_for_query_dict, fetch_patents_with_fallback
 from storage.patent_repository import save_patents
 
 logger = logging.getLogger(__name__)
@@ -51,27 +52,37 @@ def _execute_tiered_search(
     min_threshold: int = _MIN_RESULTS_THRESHOLD,
 ) -> list:
     """
-    Execute a broad → medium → narrow tiered patent search.
+    Execute a broad → medium → narrow tiered patent search (PatentsView backend).
 
-    Each tier uses a different specificity level to balance recall (broad)
-    against precision (narrow).  All tiers run and their results are merged;
-    the broad tier guarantees at least *some* results even when the narrow
-    phrase queries match nothing in the PatentsView corpus.
+    For EPO backend, delegates to epo_search_service which has its own
+    3-stage fallback.  For PatentsView, uses fetch_patents_with_fallback which
+    guarantees at least min_threshold results by progressively broadening scope.
 
     Args:
         original:      The raw user query string.
         expanded:      Validated Mistral-expanded query strings.
         tokens:        ExtractedTokens from the deterministic token extractor.
-        min_threshold: Informational threshold logged when the broad tier is
-                       already sufficient on its own.
+        min_threshold: Minimum result target for fallback stages.
 
     Returns:
         Combined list of PatentRecord objects from all tiers (pre-dedup).
     """
+    backend = settings.search_backend.lower()
+
+    # --- EPO backend ---
+    if backend == "epo" and settings.epo_consumer_key:
+        from services.epo_search_service import fetch_all_patents as epo_fetch
+        logger.info("Search backend: EPO OPS")
+        return epo_fetch(expanded)
+
+    # --- PatentsView / other backends: tiered + fallback ---
+    logger.info("Search backend: %s (tiered + fallback)", backend)
+
+    # Primary: tiered broad→medium→narrow queries
     tiers = build_tiered_queries(original, expanded, tokens)
     all_patents: list = []
 
-    for tier in tiers:  # broad → medium → narrow
+    for tier in tiers:
         tier_results: list = []
         for query_dict in tier.queries:
             results = fetch_patents_for_query_dict(query_dict)
@@ -85,18 +96,23 @@ def _execute_tiered_search(
         )
         all_patents.extend(tier_results)
 
-        if tier.strategy == "broad" and len(tier_results) >= min_threshold:
-            logger.info(
-                "Broad tier already reached threshold (%d); "
-                "medium/narrow will still run for precision boost.",
-                min_threshold,
-            )
-
         if tier.strategy == "narrow" and len(tier_results) == 0:
-            logger.warning(
-                "Narrow tier returned 0 results — "
-                "broad/medium results will be used for ranking."
-            )
+            logger.warning("Narrow tier returned 0 results.")
+
+    # If tiered search is thin, apply 3-stage fallback to top up results
+    if len(all_patents) < min_threshold:
+        logger.warning(
+            "Tiered search returned only %d patents (threshold=%d) — "
+            "activating 3-stage keyword fallback.",
+            len(all_patents), min_threshold,
+        )
+        fallback = fetch_patents_with_fallback(tokens, expanded, min_results=min_threshold)
+        seen = {p.patent_id for p in all_patents}
+        for p in fallback:
+            if p.patent_id not in seen:
+                all_patents.append(p)
+                seen.add(p.patent_id)
+        logger.info("After fallback: %d patents total", len(all_patents))
 
     return all_patents
 
@@ -237,6 +253,20 @@ def run_pipeline(
         critical_tokens=anchor_tokens,
     )
     logger.info("Stage 5 done: %d patents ranked", len(ranked))
+
+    # ------------------------------------------------------------------
+    # Stage 5b — Relevance sanity filter (Claude binary classification)
+    # Catches off-domain patents that passed the embedding threshold due
+    # to generic vocabulary overlap (e.g. "distributed" appearing in both
+    # federated-learning and sensor-network patents).
+    # ------------------------------------------------------------------
+    ranked = filter_irrelevant_patents(
+        query=query,
+        domain_concepts=tokens.domain_concepts,
+        ranked=ranked,
+        client=claude_client,
+    )
+    logger.info("Stage 5b done: %d patents after relevance filter", len(ranked))
 
     # ------------------------------------------------------------------
     # Stage 6 — LLM comparison

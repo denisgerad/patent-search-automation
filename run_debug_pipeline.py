@@ -60,15 +60,15 @@ def main():
     print("BM25 norm (filtered):", np.round(bm25_norm, 4))
     print("Hybrid (filtered):", np.round(hybrid, 4))
 
-    # Apply hybrid threshold
-    h_threshold = getattr(settings, "hybrid_threshold", 0.0)
-    if h_threshold and h_threshold > 0.0:
-        mask_h = hybrid >= h_threshold
-        print(f"Applying hybrid threshold {h_threshold:.2f}: {mask_h.sum()} pass")
-        hybrid = hybrid[mask_h]
-        cosine_f = cosine_f[mask_h]
-        bm25_norm = bm25_norm[mask_h]
-        keep_idx = keep_idx[mask_h]
+    # Apply dynamic threshold (elbow strategy) instead of fixed settings value
+    from retrieval.similarity import compute_dynamic_threshold, filter_by_threshold
+    dyn_threshold = compute_dynamic_threshold(hybrid, strategy="elbow")
+    passed_idx = filter_by_threshold(hybrid, dyn_threshold)
+    print(f"Dynamic hybrid threshold (elbow): {dyn_threshold:.4f} — {len(passed_idx)} pass")
+    hybrid    = hybrid[passed_idx]
+    cosine_f  = cosine_f[passed_idx]
+    bm25_norm = bm25_norm[passed_idx]
+    keep_idx  = keep_idx[passed_idx]
 
     # Sort and show top-k
     k = settings.top_k_results

@@ -77,12 +77,20 @@ with st.sidebar:
     st.divider()
     st.subheader("🔍 Search Backend")
     _backend_name = settings.search_backend.lower()
-    if _backend_name == "lens" and settings.lens_api_token:
-        st.success("Lens.org API ✅")
+    if _backend_name == "epo" and settings.epo_consumer_key:
+        st.success("EPO Open Patent Services ✅")
+    elif _backend_name == "epo" and not settings.epo_consumer_key:
+        st.warning("EPO — credentials missing\nAdd `epo_consumer_key` and `epo_consumer_secret` to .env")
+    elif _backend_name == "lens" and settings.lens_api_token:
+        st.success("Lens.org Patent API ✅")
     elif _backend_name == "lens" and not settings.lens_api_token:
         st.warning("Lens.org — token missing\nAdd `lens_api_token=` to .env")
+    elif _backend_name == "patentsview" and settings.patentsview_api_key:
+        st.success("USPTO PatentsView API ✅")
+    elif _backend_name == "patentsview" and not settings.patentsview_api_key:
+        st.warning("PatentsView — API key missing\nAdd `patentsview_api_key=` to .env")
     else:
-        st.info("Offline fixture data\n_(add lens_api_token to .env for live search)_")
+        st.info("Offline fixture data\n_(set `search_backend=epo/lens/patentsview` in .env for live search)_")
 
     st.divider()
     st.subheader("🤖 Active Models")
@@ -254,16 +262,26 @@ def _run_search(queries: list[str]) -> tuple[list, list]:
     backend = settings.search_backend.lower()
 
     if backend == "epo" and settings.epo_consumer_key:
-        from services.epo_search_service import fetch_all_patents
+        from services.epo_search_service import epo_fetch_by_keywords
+        # Use short critical_tokens (e.g. ["infrared", "lane detection"]) — not full sentences
+        meta = st.session_state.get("expansion_metadata", {})
+        keyword_terms = meta.get("critical_tokens", [])[:4]
+        if not keyword_terms and queries:
+            # fallback: extract words longer than 5 chars from first query
+            keyword_terms = [w for w in queries[0].lower().split() if len(w) > 5][:4]
+        logger.info("EPO search keywords (streamlit): %s", keyword_terms)
+        raw = epo_fetch_by_keywords(keyword_terms)
     elif backend == "lens" and settings.lens_api_token:
         from services.lens_search_service import fetch_all_patents
+        raw = fetch_all_patents(queries)
     elif backend == "patentsview":
         from services.search_service import fetch_all_patents
+        raw = fetch_all_patents(queries)
     else:
         # fallback to fixture if no API token is configured
         from services.fixture_search_service import fetch_all_patents
+        raw = fetch_all_patents(queries)
 
-    raw = fetch_all_patents(queries)
     unique = deduplicate(raw)
     return raw, unique
 

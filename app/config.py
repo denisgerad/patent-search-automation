@@ -153,6 +153,12 @@ class Settings(BaseSettings):
         "patent_date",
     ]
 
+    @field_validator("patentsview_api_key", "epo_consumer_key", mode="before")
+    @classmethod
+    def _strip_key_whitespace(cls, v: object) -> str:
+        """Strip invisible whitespace that silently breaks API key truth-checks."""
+        return (v or "").strip() if isinstance(v, str) else (v or "")
+
     @field_validator("patentsview_api_url")
     @classmethod
     def _must_be_patentsview(cls, v: str) -> str:

@@ -18,6 +18,7 @@ the funnel narrows.  All external calls are injected as arguments so the
 pipeline can be tested with mocks without monkey-patching.
 """
 import logging
+from enum import Enum
 from pathlib import Path
 
 from app.config import settings
@@ -33,7 +34,6 @@ from services import (
 )
 from services import embedding_service, ranking_service
 from services.relevance_filter import filter_irrelevant_patents
-from services.query_builder import build_tiered_queries
 from services.search_service import fetch_patents_for_query_dict, fetch_patents_with_fallback
 from storage.patent_repository import save_patents
 
@@ -45,76 +45,149 @@ logger = logging.getLogger(__name__)
 _MIN_RESULTS_THRESHOLD: int = 10
 
 
-def _execute_tiered_search(
-    original: str,
-    expanded: list[str],
+# ---------------------------------------------------------------------------
+# Backend routing
+# ---------------------------------------------------------------------------
+
+class SearchBackend(Enum):
+    PATENTSVIEW = "patentsview"
+    EPO = "epo"
+
+
+def _resolve_backend() -> SearchBackend:
+    """
+    Single source of truth for backend selection.
+    Evaluated ONCE at pipeline start.
+
+    Bug 1 fix: .strip() before truth-check so trailing whitespace in .env
+               never causes silent fallthrough.
+    Raises immediately if no key is configured — never proceeds undefined.
+    """
+    epo_key = (settings.epo_consumer_key or "").strip()
+    pv_key  = (settings.patentsview_api_key or "").strip()
+
+    if epo_key:
+        logger.info("Backend resolved: EPO (epo_consumer_key present)")
+        return SearchBackend.EPO
+
+    if pv_key:
+        logger.info("Backend resolved: PatentsView (patentsview_api_key present)")
+        return SearchBackend.PATENTSVIEW
+
+    raise RuntimeError(
+        "No API key found for any search backend. "
+        "Set patentsview_api_key or epo_consumer_key in .env"
+    )
+
+
+def _search(
+    backend: SearchBackend,
     tokens,
-    min_threshold: int = _MIN_RESULTS_THRESHOLD,
+    validated_queries: list[str],
 ) -> list:
     """
-    Execute a broad → medium → narrow tiered patent search (PatentsView backend).
-
-    For EPO backend, delegates to epo_search_service which has its own
-    3-stage fallback.  For PatentsView, uses fetch_patents_with_fallback which
-    guarantees at least min_threshold results by progressively broadening scope.
-
-    Args:
-        original:      The raw user query string.
-        expanded:      Validated Mistral-expanded query strings.
-        tokens:        ExtractedTokens from the deterministic token extractor.
-        min_threshold: Minimum result target for fallback stages.
-
-    Returns:
-        Combined list of PatentRecord objects from all tiers (pre-dedup).
+    Bug 3 fix: backends are mutually exclusive — no cross-fallback.
+    PatentsView is never called when backend == EPO, and vice versa.
     """
-    backend = settings.search_backend.lower()
+    if backend == SearchBackend.EPO:
+        return _search_epo(tokens, validated_queries)
+    if backend == SearchBackend.PATENTSVIEW:
+        return _search_patentsview(tokens, validated_queries)
+    raise ValueError(f"Unhandled backend: {backend}")
 
-    # --- EPO backend ---
-    if backend == "epo" and settings.epo_consumer_key:
-        from services.epo_search_service import fetch_all_patents as epo_fetch
-        logger.info("Search backend: EPO OPS")
-        return epo_fetch(expanded)
 
-    # --- PatentsView / other backends: tiered + fallback ---
-    logger.info("Search backend: %s (tiered + fallback)", backend)
+def _search_epo(tokens, validated_queries: list[str]) -> list:
+    """
+    Bug 2 fix: passes tokens.critical_tokens (short keyword terms) to EPO CQL,
+    not full natural-language phrases from Mistral expansion.
+    """
+    from services.epo_search_service import epo_fetch_by_keywords
 
-    # Primary: tiered broad→medium→narrow queries
-    tiers = build_tiered_queries(original, expanded, tokens)
-    all_patents: list = []
+    keyword_terms = list(tokens.critical_tokens[:4])
+    if not keyword_terms and validated_queries:
+        # Final fallback: extract words longer than 5 chars from first query
+        keyword_terms = [
+            w for w in validated_queries[0].lower().split() if len(w) > 5
+        ][:4]
 
-    for tier in tiers:
-        tier_results: list = []
-        for query_dict in tier.queries:
-            results = fetch_patents_for_query_dict(query_dict)
-            tier_results.extend(results)
+    logger.info("EPO search keywords: %s", keyword_terms)
+    results = epo_fetch_by_keywords(keyword_terms)
+    logger.info("EPO returned %d patents", len(results))
 
-        logger.info(
-            "Tier '%s' returned %d patents (%s)",
-            tier.strategy,
-            len(tier_results),
-            tier.description,
-        )
-        all_patents.extend(tier_results)
-
-        if tier.strategy == "narrow" and len(tier_results) == 0:
-            logger.warning("Narrow tier returned 0 results.")
-
-    # If tiered search is thin, apply 3-stage fallback to top up results
-    if len(all_patents) < min_threshold:
+    if not results:
         logger.warning(
-            "Tiered search returned only %d patents (threshold=%d) — "
-            "activating 3-stage keyword fallback.",
-            len(all_patents), min_threshold,
+            "EPO returned 0 patents. Keywords: %s — "
+            "consider broadening taxonomy in token_extractor.py",
+            keyword_terms,
         )
-        fallback = fetch_patents_with_fallback(tokens, expanded, min_results=min_threshold)
-        seen = {p.patent_id for p in all_patents}
-        for p in fallback:
-            if p.patent_id not in seen:
-                all_patents.append(p)
-                seen.add(p.patent_id)
-        logger.info("After fallback: %d patents total", len(all_patents))
+    return results
 
-    return all_patents
+
+def _search_patentsview(tokens, validated_queries: list[str]) -> list:
+    """
+    Three-stage PatentsView search. Never calls EPO.
+    Returns [] with a clear error log if all stages fail.
+    """
+    MIN = 15
+    results: list = []
+    seen_ids: set[str] = set()
+
+    def _add(batch: list) -> None:
+        for p in batch:
+            if p.patent_id not in seen_ids:
+                seen_ids.add(p.patent_id)
+                results.append(p)
+
+    from services.search_service import fetch_all_patents
+
+    # Stage 1: phrase queries from Mistral expansion
+    _add(fetch_all_patents(validated_queries))
+    logger.info("PatentsView stage 1: %d patents", len(results))
+    if len(results) >= MIN:
+        return results
+
+    # Stage 2: single critical token, _text_any
+    for token in tokens.critical_tokens[:4]:
+        batch = fetch_patents_for_query_dict({
+            "_or": [
+                {"_text_any": {"patent_title":    token}},
+                {"_text_any": {"patent_abstract": token}},
+            ]
+        })
+        _add(batch)
+        logger.info("PatentsView stage 2 token '%s': %d", token, len(batch))
+        if len(results) >= MIN:
+            return results
+
+    # Stage 3: domain concept, abstract only
+    for concept in tokens.domain_concepts[:2]:
+        term = concept.replace("_", " ")
+        _add(fetch_patents_for_query_dict({"_text_any": {"patent_abstract": term}}))
+        logger.info("PatentsView stage 3 concept '%s': %d total", concept, len(results))
+
+    if not results:
+        logger.error(
+            "PatentsView returned 0 patents across all 3 stages. "
+            "API key: %s | Check connectivity and field names.",
+            "present" if settings.patentsview_api_key else "MISSING",
+        )
+    return results
+
+
+def _assert_source(patents: list, backend: SearchBackend) -> None:
+    """Log a loud warning if records don't match the expected backend."""
+    for p in patents[:5]:
+        is_numeric = (p.patent_id or "").replace("-", "").isdigit()
+        if backend == SearchBackend.PATENTSVIEW and not is_numeric:
+            raise RuntimeError(
+                f"PatentsView backend returned non-USPTO ID: {p.patent_id!r}\n"
+                "Routing bug — EPO records entering PatentsView pipeline."
+            )
+        if backend == SearchBackend.EPO and is_numeric:
+            logger.warning(
+                "EPO backend returned numeric ID %s — may be a USPTO patent via EPO.",
+                p.patent_id,
+            )
 
 
 # Module-level singletons — constructed once, reused for every pipeline call.
@@ -177,6 +250,9 @@ def run_pipeline(
 
     logger.info("Pipeline start: query='%s'", query)
 
+    # Resolve backend ONCE — never re-check inside the pipeline
+    backend = _resolve_backend()
+
     # ------------------------------------------------------------------
     # Stage 1 — Query expansion (constrained by domain token anchors)
     # ------------------------------------------------------------------
@@ -196,16 +272,19 @@ def run_pipeline(
     )
 
     # ------------------------------------------------------------------
-    # Stage 2 — Tiered patent search (broad → medium → narrow)
+    # Stage 2 — Patent search (strictly routed, no cross-backend fallback)
     # ------------------------------------------------------------------
-    raw_patents = _execute_tiered_search(query, validated_queries, tokens)
-    logger.info("Stage 2 done: %d raw patents fetched (tiered)", len(raw_patents))
+    raw_patents = _search(backend, tokens, validated_queries)
+    logger.info("Stage 2 done: %d raw patents fetched (backend=%s)", len(raw_patents), backend.value)
 
     # ------------------------------------------------------------------
     # Stage 3 — Deduplication
     # ------------------------------------------------------------------
     patents = dedup_service.deduplicate(raw_patents)
     logger.info("Stage 3 done: %d unique patents after dedup", len(patents))
+
+    # Source guard — crash loudly if wrong-backend records enter the pipeline
+    _assert_source(patents, backend)
 
     if not patents:
         logger.warning("No patents found for query='%s'. Pipeline aborted.", query)

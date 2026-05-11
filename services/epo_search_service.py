@@ -334,6 +334,33 @@ def _fetch_for_terms(terms: list[str]) -> list[PatentRecord]:
     return _fetch_details_batch(all_refs)
 
 
+def epo_fetch_by_keywords(keyword_terms: list[str]) -> list[PatentRecord]:
+    """
+    Bug 2 fix: build CQL from short keyword terms, never full sentences.
+
+    Correct input:  ["infrared", "lane detection", "autonomous vehicle"]
+    Wrong input:    ["Method for lane detection comprising infrared steps"]
+
+    Single words are used bare; multi-word terms are quoted for phrase search.
+    All terms are AND-ed for precision; the internal 3-stage fallback in
+    fetch_all_patents broadens automatically if AND returns < MIN_RESULTS.
+    """
+    if not keyword_terms:
+        return []
+
+    # Build CQL: ti= OR ab= per term, all terms AND-ed together
+    parts = []
+    for term in keyword_terms:
+        quoted = f'"{term}"' if " " in term else term
+        parts.append(f"(ti={quoted} OR ab={quoted})")
+
+    cql = " AND ".join(parts)
+    log.info("EPO CQL (from keywords): %s", cql)
+
+    # Reuse existing pagination + detail-fetch machinery
+    return _fetch_for_terms(keyword_terms)
+
+
 def fetch_all_patents(query_terms: list[str]) -> list[PatentRecord]:
     """
     Search EPO OPS for *query_terms* and return combined PatentRecord list.

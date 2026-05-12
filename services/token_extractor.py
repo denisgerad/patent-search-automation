@@ -68,6 +68,11 @@ class ExtractedTokens:
     original_query: str = ""
     """The raw user query that was analysed."""
 
+    concept_groups: dict = field(default_factory=dict)
+    """Per-concept grouping used for coverage scoring.
+    Shape: {"sensor": {"terms": [...], "patent_synonyms": [...]}, ...}
+    """
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -92,6 +97,7 @@ def extract_critical_tokens(query: str) -> ExtractedTokens:
     critical_tokens: list[str] = []
     domain_concepts: list[str] = []
     patent_synonyms: list[str] = []
+    concept_groups: dict = {}
 
     for concept, data in DOMAIN_TAXONOMY.items():
         matched_terms = [t for t in data["terms"] if t in query_lower]
@@ -99,6 +105,10 @@ def extract_critical_tokens(query: str) -> ExtractedTokens:
             critical_tokens.extend(matched_terms)
             domain_concepts.append(concept)
             patent_synonyms.extend(data["patent_synonyms"])
+            concept_groups[concept] = {
+                "terms": data["terms"],
+                "patent_synonyms": data["patent_synonyms"],
+            }
 
     # Fallback: extract noun phrases via simple heuristic when taxonomy misses
     if not critical_tokens:
@@ -109,6 +119,7 @@ def extract_critical_tokens(query: str) -> ExtractedTokens:
         domain_concepts=list(dict.fromkeys(domain_concepts)),
         patent_synonyms=list(dict.fromkeys(patent_synonyms)),
         original_query=query,
+        concept_groups=concept_groups,
     )
 
 

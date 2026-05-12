@@ -330,6 +330,7 @@ def run_pipeline(
         query_vec=query_vec,
         top_k=k,
         critical_tokens=anchor_tokens,
+        tokens=tokens,
     )
     logger.info("Stage 5 done: %d patents ranked", len(ranked))
 

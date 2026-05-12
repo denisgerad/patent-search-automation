@@ -126,3 +126,78 @@ def filter_by_threshold(
     """
     above = np.where(scores >= threshold)[0]
     return above[np.argsort(scores[above])[::-1]]
+
+
+def compute_token_coverage(patent, tokens) -> dict:
+    """
+    Compute how many critical token groups are represented in the patent.
+
+    Tokens from the same domain concept count as one group — "infrared" and
+    "IR sensor" both satisfy the sensor concept, not two wins.
+
+    Args:
+        patent: PatentRecord — patent to evaluate.
+        tokens: ExtractedTokens — must have a populated concept_groups dict.
+
+    Returns:
+        dict with keys: coverage (float 0–1), matched_concepts (int),
+        total_concepts (int), concept_hits (dict[str, bool]).
+    """
+    text = (
+        f"{patent.patent_title or ''} {patent.patent_abstract or ''}"
+    ).lower()
+
+    concept_hits: dict[str, bool] = {}
+    for concept, data in tokens.concept_groups.items():
+        terms = [t.lower() for t in data.get("terms", [])]
+        synonyms = [s.lower() for s in data.get("patent_synonyms", [])]
+        concept_hits[concept] = any(t in text for t in terms + synonyms)
+
+    total_concepts = len(concept_hits)
+    matched_concepts = sum(concept_hits.values())
+    coverage = matched_concepts / total_concepts if total_concepts else 0.0
+
+    return {
+        "coverage": coverage,
+        "matched_concepts": matched_concepts,
+        "total_concepts": total_concepts,
+        "concept_hits": concept_hits,
+    }
+
+
+def apply_coverage_penalty(
+    hybrid_score: float,
+    coverage: float,
+    penalty_curve: str = "quadratic",
+) -> float:
+    """
+    Apply a smooth penalty based on concept coverage.
+
+    Coverage 1.0 (all concepts matched) → no penalty
+    Coverage 0.67 (2/3 matched)         → moderate penalty
+    Coverage 0.33 (1/3 matched)         → heavy penalty
+    Coverage 0.0  (nothing matched)     → maximum penalty
+
+    penalty_curve options:
+      linear    : multiplier = coverage
+      quadratic : multiplier = coverage ** 2  (recommended — accelerating penalty)
+      step      : hard cutoffs at fixed thresholds
+    """
+    if penalty_curve == "linear":
+        multiplier = coverage
+    elif penalty_curve == "quadratic":
+        multiplier = coverage ** 2
+    elif penalty_curve == "step":
+        if coverage == 1.0:
+            multiplier = 1.0
+        elif coverage >= 0.67:
+            multiplier = 0.6
+        elif coverage >= 0.33:
+            multiplier = 0.25
+        else:
+            multiplier = 0.05
+    else:
+        multiplier = coverage  # fallback to linear
+
+    return hybrid_score * multiplier
+

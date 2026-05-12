@@ -28,6 +28,8 @@ class RankedPatent(BaseModel):
     cosine_score: float
     bm25_score: float
     hybrid_score: float
+    coverage: float = 0.0
+    concept_hits: dict = {}
 
 
 class PipelineResult(BaseModel):

@@ -179,6 +179,7 @@ def rank(
     query_vec: np.ndarray,
     top_k: int | None = None,
     critical_tokens: list[str] | None = None,
+    tokens=None,
 ) -> list[RankedPatent]:
     """
     Rank *patents* using hybrid cosine + BM25 scoring.
@@ -237,8 +238,29 @@ def rank(
     bm25_norm = normalize(bm25_raw)
     hybrid    = hybrid_rank(cosine_f, bm25_raw)   # hybrid_rank normalises BM25 internally
 
-    # 4b. Token anchor enforcement — penalise patents missing all domain anchors.
-    hybrid = _apply_token_anchor_penalty(hybrid, patents_f, critical_tokens or [])
+    # 4b. Coverage-based scoring or binary anchor penalty (legacy fallback).
+    from retrieval.similarity import compute_token_coverage, apply_coverage_penalty
+    coverage_data_list: list[dict] = []
+    if tokens is not None and getattr(tokens, "concept_groups", None):
+        penalised_hybrid = np.empty_like(hybrid)
+        for i, patent in enumerate(patents_f):
+            cov_data = compute_token_coverage(patent, tokens)
+            coverage_data_list.append(cov_data)
+            penalised_hybrid[i] = apply_coverage_penalty(
+                float(hybrid[i]), cov_data["coverage"], penalty_curve="quadratic"
+            )
+            logger.debug(
+                "Coverage penalty: patent=%s coverage=%.2f raw=%.4f penalised=%.4f hits=%s",
+                patent.patent_id,
+                cov_data["coverage"],
+                float(hybrid[i]),
+                float(penalised_hybrid[i]),
+                cov_data["concept_hits"],
+            )
+        hybrid = penalised_hybrid
+    else:
+        hybrid = _apply_token_anchor_penalty(hybrid, patents_f, critical_tokens or [])
+        coverage_data_list = [{"coverage": 0.0, "concept_hits": {}} for _ in patents_f]
 
     # 4c. Dynamic threshold on hybrid scores — replaces fixed settings.hybrid_threshold.
     # Uses the "elbow" strategy (sharpest score drop) so the cutoff adapts to
@@ -256,6 +278,7 @@ def rank(
     cosine_f  = cosine_f[passed]
     bm25_norm = bm25_norm[passed]
     hybrid    = hybrid[passed]
+    coverage_data_list = [coverage_data_list[i] for i in passed]
 
     # 5. Sort descending and take top-k.
     sorted_idx = np.argsort(hybrid)[::-1][:k]
@@ -268,6 +291,8 @@ def rank(
                 cosine_score=float(cosine_f[i]),    # raw cosine in [0, 1]
                 bm25_score=float(bm25_norm[i]),     # normalised BM25 in [0, 1]
                 hybrid_score=float(hybrid[i]),
+                coverage=float(coverage_data_list[i]["coverage"]),
+                concept_hits=coverage_data_list[i]["concept_hits"],
             )
         )
 

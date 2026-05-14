@@ -21,8 +21,6 @@ rank-bm25>=0.2.2
 
 # LLM Clients
 anthropic>=0.25                 # Claude
-ollama>=0.2                     # local Mistral via Ollama
-openai>=1.12.0                  # optional GPT support
 
 # Storage
 sqlalchemy>=2.0                 # MySQL / Postgres repository layer

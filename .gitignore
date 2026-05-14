@@ -30,6 +30,11 @@ env/
 ENV/
 
 # -------------------------------------------------------
+# Versions / release zips
+# -------------------------------------------------------
+versions/
+
+# -------------------------------------------------------
 # Data — raw API responses and processed artefacts
 # can be large; regenerate from the pipeline instead
 # -------------------------------------------------------

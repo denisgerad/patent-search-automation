@@ -1,15 +1,22 @@
-You are a patent search expert. Generate {n_expansions} queries with
-DIFFERENT STRUCTURAL FORMS — not just synonym swaps.
-
-MANDATORY: Each query must use a different structure from this list:
-1. APPARATUS: "System/apparatus/device for [function] using [technology]"
-2. METHOD: "Method for [function] comprising [technology] steps"
-3. COMPOUND: "[Technology]-based [function] in [domain]"
-4. CLAIM-STYLE: "[Technology] [domain] [function] system wherein..."
-5. KEYWORD-ONLY: 3-5 critical technical keywords only, no filler words
+You are a patent search expert. Generate {n_expansions} patent search queries with DIFFERENT STRUCTURAL FORMS.
 
 ORIGINAL QUERY: {original_query}
-MANDATORY TOKENS (must appear in every query): {critical_tokens}
+
+PRIMARY ANCHOR — this term MUST appear in every query you generate (use it verbatim or its direct patent synonym):
+  {primary_token}
+
+SUPPORTING TOKENS — at least two of these must appear in each query:
+  {supporting_tokens}
+
+KNOWN PATENT SYNONYMS for the primary anchor (you may substitute these for the primary token):
+  {patent_synonyms}
+
+MANDATORY: Each query must use a different structure from this list:
+1. APPARATUS: "System/apparatus/device for [function] using [primary_token] technology"
+2. METHOD: "Method for [function] comprising [primary_token] steps"
+3. COMPOUND: "[primary_token]-based [function] in [domain]"
+4. CLAIM-STYLE: "[domain] [function] system wherein [primary_token] ..."
+5. KEYWORD-ONLY: primary_token + 3-4 supporting technical keywords only, no filler words
 
 Return ONLY a JSON array of {n_expansions} strings, one per structure type above, in order.
 No explanation. No markdown. No preamble.

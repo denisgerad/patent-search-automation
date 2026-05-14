@@ -263,13 +263,18 @@ def _run_search(queries: list[str]) -> tuple[list, list]:
 
     if backend == "epo" and settings.epo_consumer_key:
         from services.epo_search_service import epo_fetch_by_keywords
-        # Use short critical_tokens (e.g. ["infrared", "lane detection"]) — not full sentences
         meta = st.session_state.get("expansion_metadata", {})
-        keyword_terms = meta.get("critical_tokens", [])[:4]
+
+        # epo_search_order: most discriminating term first (set by Claude pre-call)
+        keyword_terms = meta.get("epo_search_order", [])[:4]
+
+        # Fallbacks
+        if not keyword_terms:
+            keyword_terms = meta.get("critical_tokens", [])[:4]
         if not keyword_terms and queries:
-            # fallback: extract words longer than 5 chars from first query
             keyword_terms = [w for w in queries[0].lower().split() if len(w) > 5][:4]
-        logger.info("EPO search keywords (streamlit): %s", keyword_terms)
+
+        logger.info("EPO CQL order (streamlit): %s", keyword_terms)
         raw = epo_fetch_by_keywords(keyword_terms)
     elif backend == "lens" and settings.lens_api_token:
         from services.lens_search_service import fetch_all_patents
@@ -533,6 +538,30 @@ with tab_expand:
 
         # ── Claude expansion mode panel ────────────────────────────────────
         else:
+            # ── Primary token panel ──────────────────────────────────────
+            meta = st.session_state.expansion_metadata
+            _primary      = meta.get("primary_token", "")
+            _supporting   = meta.get("supporting_tokens", [])
+            _epo_order    = meta.get("epo_search_order", [])
+            _domain       = meta.get("domain_concepts", [])
+
+            if _primary:
+                _epo_str = " → ".join(f"`{t}`" for t in _epo_order) if _epo_order else "—"
+                st.info(
+                    f"🎯 **Primary anchor (inventive concept):** `{_primary}`  \n"
+                    f"**Supporting tokens:** {', '.join(f'`{t}`' for t in _supporting) if _supporting else '—'}  \n"
+                    f"**EPO search order** *(most → least discriminating)*: {_epo_str}  \n"
+                    f"**Domain concepts:** {', '.join(_domain) if _domain else '—'}  \n\n"
+                    "_Every expanded query is constrained to keep the primary anchor. "
+                    "EPO CQL uses the discriminating order above — multi-word phrases filter first._"
+                )
+            else:
+                st.warning(
+                    "⚠️ No primary anchor identified — expansions may drift. "
+                    "Try making the inventive concept more explicit in your query."
+                )
+
+            st.divider()
             st.success(f"{len(st.session_state.expanded_queries)} queries generated"
                        + (" (incl. original)" if use_mistral else " (Claude disabled)"))
             for i, q in enumerate(st.session_state.expanded_queries):

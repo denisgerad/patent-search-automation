@@ -1,0 +1,60 @@
+step 1 example:
+user input
+A system for autonomous vehicle lane detection using infrared sensors
+
+step 2:
+raw claude response
+[
+  "Apparatus for autonomous vehicle lane detection using infrared sensor technology",
+  "Method for lane detection comprising infrared sensing steps in autonomous vehicle navigation",
+  "Infrared-based lane detection in autonomous vehicle systems",
+  "Infrared autonomous vehicle lane detection system wherein sensor arrays identify road boundaries",
+  "infrared autonomous vehicle lane detection sensors"
+]
+
+For the query "A system for autonomous vehicle lane detection using infrared sensors", here's exactly what happens:
+
+Token extraction (rule-based, no LLM)
+
+The DOMAIN_TAXONOMY is scanned against the lowercased query. Matches:
+
+Taxonomy domain	    Matched term
+sensor	            infrared
+autonomous_vehicle	autonomous vehicle
+detection	        lane detection
+
+So critical_tokens = ["infrared", "autonomous vehicle", "lane detection"]
+
+EPO CQL query built from those tokens (first 4 tokens, AND logic):
+(ti=infrared OR ab=infrared) AND (ti="autonomous vehicle" OR ab="autonomous vehicle") AND (ti="lane detection" OR ab="lane detection")
+
+Multi-word terms get quoted automatically ("autonomous vehicle", "lane detection"). Single words are unquoted (infrared).
+
+If AND returns 0 results, it retries with OR:
+(ti=infrared OR ab=infrared) OR (ti="autonomous vehicle" OR ab="autonomous vehicle") OR (ti="lane detection" OR ab="lane detection")
+
+Note: The 5 Claude-expanded strings are not sent to EPO at all. Only the critical_tokens from the original query go to EPO. The expanded strings are only used later for embedding/ranking.
+
+step2
+Step 2 (Tab 2) — Listing ✅, Saving ⚠️
+
+The EPO results are displayed correctly. However, MySQL saving does NOT happen in the Streamlit "Run to Top 20" flow. save_patents() is only called inside orchestrator/patent_pipeline.py → run_pipeline(), which the Streamlit buttons never invoke. The UI calls _run_search() and _run_rank() directly, bypassing the orchestrator entirely.
+
+step 4:
+Step 4 (Tab 3) — Ranking quality problem visible in your example
+
+The top-ranked result WO.2026093959.A1 is about climate control + space-based infrared radiation filtering — completely irrelevant to autonomous vehicle lane detection. It ranked #1 because:
+
+BM25: 1.0000 — "infrared" appears heavily in the abstract, so BM25 maxes out
+Cosine: 0.6526 — reasonably high because "infrared" + "system" overlap with the query embedding
+This is exactly the problem the _apply_token_anchor_penalty() was designed to prevent, but it failed here because "infrared" is one of the critical tokens — so the patent passes the anchor check even though it's off-domain.
+
+The anchor penalty only fires when a patent has none of the critical tokens. This patent has "infrared", so no penalty is applied, even though "lane detection" and "autonomous vehicle" are absent from the abstract entirely.
+
+Summary:
+
+Check	                                    Status
+EPO results listed in Tab 2	                ✅ Working
+Saved to MySQL from UI	                    ❌ Not happening (only via orchestrator)
+Ranked results shown in Tab 3	            ✅ Working
+Ranking quality (top result irrelevant)	    ⚠️ Known weakness — single-token anchor match is insufficient

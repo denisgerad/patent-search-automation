@@ -1,20 +1,33 @@
 """
 services/epo_search_service.py
 
-EPO Open Patent Services (OPS) search backend.
+EPO CQL builder — updated to use tokens.epo_search_order.
 
-Uses EPOClient (models/epo_client.py) which mirrors the two-step pattern
-from test_epo.py:
-  Step 1: search CQL → get patent IDs
-  Step 2: fetch biblio per ID → get title + abstract
+Key change:
+  _build_cql() now receives terms pre-ordered by discriminating power
+  (most specific multi-word phrase first, generic single terms last).
+  This means EPO's AND chain filters aggressively on the most specific
+  term first, producing a much smaller and more relevant result set
+  before the less discriminating terms are applied.
 
-Token is cached in the singleton _epo_client so re-auth does not happen
-on every query call.
+  Example for "autonomous vehicle lane detection using infrared":
+    OLD: (ti=infrared OR ab=infrared) AND (ti="autonomous vehicle" OR ...) AND ...
+    NEW: (ti="autonomous vehicle" OR ab="autonomous vehicle")
+         AND (ti="lane detection" OR ab="lane detection")
+         AND (ti=infrared OR ab=infrared)
 
-Public API
-----------
-epo_fetch_by_keywords(keyword_terms) -> list[PatentRecord]
-fetch_all_patents(query_terms)        -> list[PatentRecord]
+  The new order means EPO first finds patents about autonomous vehicles
+  (already a narrow domain), then filters to lane detection ones, then
+  to infrared ones — instead of starting with every infrared patent
+  across medical, display, security, and automotive domains.
+
+Tiered search strategy:
+  Tier 1 — FULL AND: all terms in epo_search_order. Highest precision.
+  Tier 2 — DROP LAST: remove the least discriminating term (last in order).
+            Used if Tier 1 returns zero results.
+  Tier 3 — TOP 2 ONLY: use only the two most discriminating terms.
+            Final fallback before OR relaxation.
+  Tier 4 — OR relaxation: only if all AND tiers returned nothing.
 """
 
 from __future__ import annotations
@@ -25,22 +38,20 @@ from utils.logger import get_logger
 
 log = get_logger(__name__)
 
-# Module-level singleton — one token shared across all calls in a session
 _epo_client = EPOClient()
 
 
 def _build_cql(keyword_terms: list[str]) -> str:
     """
-    Build CQL from short keyword terms only.
+    Build EPO CQL from terms already ordered by discriminating power.
+    Multi-word terms are phrase-quoted automatically.
 
-    Correct input : ["infrared", "lane detection", "autonomous vehicle"]
-    Wrong input   : ["Method for lane detection comprising infrared steps"]
-
-    CQL reference:
-      ti=term        → title contains term
-      ab=term        → abstract contains term
-      "two words"    → phrase search (wrap multi-word in quotes)
-      AND            → all conditions must match
+    Example input (most → least discriminating):
+      ["autonomous vehicle", "lane detection", "infrared"]
+    Output:
+      (ti="autonomous vehicle" OR ab="autonomous vehicle")
+      AND (ti="lane detection" OR ab="lane detection")
+      AND (ti=infrared OR ab=infrared)
     """
     parts = []
     for term in keyword_terms:
@@ -51,67 +62,75 @@ def _build_cql(keyword_terms: list[str]) -> str:
 
 def epo_fetch_by_keywords(keyword_terms: list[str]) -> list[PatentRecord]:
     """
-    Full two-step EPO fetch matching the test_epo.py pattern.
+    Search EPO with a tiered AND strategy using pre-ordered keyword_terms.
 
-    Step 1: search CQL → get patent IDs
-    Step 2: fetch biblio per ID → get title + abstract
-    Step 3: convert to PatentRecord objects
-
-    keyword_terms must be short technical terms from token_extractor,
-    NOT full Mistral-expanded natural language phrases.
+    keyword_terms should be tokens.epo_search_order (most discriminating first).
+    Falls back through progressively relaxed tiers if no results found.
     """
     if not keyword_terms:
         log.warning("epo_fetch_by_keywords called with empty terms")
         return []
 
-    # Step 1 — build CQL and search (AND query for precision)
+    # --- Tier 1: full AND on all terms (highest precision) ----------------
     cql = _build_cql(keyword_terms)
-    log.info(f"EPO CQL: {cql}")
-    patent_ids = _epo_client.search(cql, max_results=25)
+    log.info("EPO Tier 1 CQL: %s", cql)
+    patent_ids = _epo_client.search(cql, max_results=50)
 
+    # --- Tier 2: drop least discriminating term (last in list) ------------
+    if not patent_ids and len(keyword_terms) > 2:
+        tier2_terms = keyword_terms[:-1]
+        cql2 = _build_cql(tier2_terms)
+        log.info("EPO Tier 2 CQL (dropped '%s'): %s", keyword_terms[-1], cql2)
+        patent_ids = _epo_client.search(cql2, max_results=50)
+
+    # --- Tier 3: top 2 most discriminating terms only ---------------------
+    if not patent_ids and len(keyword_terms) > 1:
+        tier3_terms = keyword_terms[:2]
+        cql3 = _build_cql(tier3_terms)
+        log.info("EPO Tier 3 CQL (top-2 only): %s", cql3)
+        patent_ids = _epo_client.search(cql3, max_results=50)
+
+    # --- Tier 4: OR relaxation (last resort) ------------------------------
     if not patent_ids:
-        # Retry with relaxed CQL — OR instead of AND
-        log.warning("No results with AND query, retrying with OR")
-        relaxed_parts = []
+        parts = []
         for term in keyword_terms:
             quoted = f'"{term}"' if " " in term else term
-            relaxed_parts.append(f"(ti={quoted} OR ab={quoted})")
-        relaxed_cql = " OR ".join(relaxed_parts)
-        log.info(f"EPO relaxed CQL: {relaxed_cql}")
-        patent_ids = _epo_client.search(relaxed_cql, max_results=25)
+            parts.append(f"(ti={quoted} OR ab={quoted})")
+        cql_or = " OR ".join(parts)
+        log.warning("EPO Tier 4 CQL (OR relaxation): %s", cql_or)
+        patent_ids = _epo_client.search(cql_or, max_results=50)
 
     if not patent_ids:
-        log.error(f"EPO returned 0 patents for terms: {keyword_terms}")
+        log.error("EPO returned 0 patents across all tiers for terms: %s", keyword_terms)
         return []
 
-    # Step 2 — fetch full biblio per ID
+    # Fetch biblio for each patent ID
     records: list[PatentRecord] = []
     for pid in patent_ids:
         biblio = _epo_client.fetch_biblio(pid)
         if not biblio:
             continue
         if biblio["abstract"] == "NO ABSTRACT FOUND":
-            log.debug(f"Skipping {pid} — no abstract (unusable for embedding)")
+            log.debug("Skipping %s — no abstract", pid)
             continue
         try:
             records.append(PatentRecord(
                 patent_id       = biblio["patent_id"],
                 patent_title    = biblio["title"],
                 patent_abstract = biblio["abstract"],
-                patent_type     = "",      # EPO doesn't return type in biblio
+                patent_type     = "",
                 patent_date     = None,
             ))
         except Exception as e:
-            log.warning(f"PatentRecord build failed for {pid}: {e}")
+            log.warning("PatentRecord build failed for %s: %s", pid, e)
 
-    log.info(f"EPO fetch complete: {len(records)} usable records "
-             f"(with abstracts) from {len(patent_ids)} IDs")
+    log.info(
+        "EPO fetch complete: %d usable records from %d IDs",
+        len(records), len(patent_ids),
+    )
     return records
 
 
 def fetch_all_patents(query_terms: list[str]) -> list[PatentRecord]:
-    """
-    Compatibility wrapper — delegates to epo_fetch_by_keywords.
-    query_terms are treated as short keyword terms (same as keyword_terms).
-    """
+    """Compatibility wrapper."""
     return epo_fetch_by_keywords(query_terms)

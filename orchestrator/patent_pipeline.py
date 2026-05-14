@@ -98,19 +98,26 @@ def _search(
 
 def _search_epo(tokens, validated_queries: list[str]) -> list:
     """
-    Bug 2 fix: passes tokens.critical_tokens (short keyword terms) to EPO CQL,
-    not full natural-language phrases from Mistral expansion.
+    Uses tokens.epo_search_order (most discriminating term first) so EPO's
+    AND chain filters on the most specific concept before less specific ones.
+    Falls back to critical_tokens / long words if epo_search_order is empty.
     """
     from services.epo_search_service import epo_fetch_by_keywords
 
-    keyword_terms = list(tokens.critical_tokens[:4])
+    # Primary: use epo_search_order set by Claude pre-call or specificity sort
+    keyword_terms: list[str] = list(getattr(tokens, "epo_search_order", []))[:4]
+
+    # Backward compat fallbacks
+    if not keyword_terms:
+        keyword_terms = list(tokens.critical_tokens[:4])
     if not keyword_terms and validated_queries:
-        # Final fallback: extract words longer than 5 chars from first query
         keyword_terms = [
             w for w in validated_queries[0].lower().split() if len(w) > 5
         ][:4]
 
-    logger.info("EPO search keywords: %s", keyword_terms)
+    logger.info(
+        "EPO CQL order (most→least discriminating): %s", keyword_terms,
+    )
     results = epo_fetch_by_keywords(keyword_terms)
     logger.info("EPO returned %d patents", len(results))
 

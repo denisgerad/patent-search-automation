@@ -1,0 +1,180 @@
+The problem is now crystal clear. Step 2 returns the exact same 5 ML patents for every query — this has nothing to do with your query or embeddings. Your vector store has only those 5 patents in it.
+
+What's Actually Happening
+Query: infrared eye tracking driver fatigue
+         ↓
+Search Service  →  PatentsView API  →  Returns 0 patents (too narrow)
+         ↓
+Vector Store    →  5 hardcoded ML patents (pre-loaded fixture data)
+         ↓
+Cosine similarity runs against those 5 ML patents
+         ↓
+"Federated learning" wins because it scores highest among 5 bad options
+Your pipeline is falling through to a pre-populated vector store instead of using live search results. The embeddings and ranking are working correctly — they're just operating on the wrong corpus.
+
+Verify This First
+Add these two debug prints immediately to confirm:
+python# orchestrator/patent_pipeline.py  — add after search step
+
+log.info(f"Search returned: {len(raw_patents)} patents")
+log.info(f"After dedup: {len(patents)} patents")
+log.info(f"Sample titles: {[p.patent_title for p in patents[:3]]}")
+
+# Also check what's in your vector store
+log.info(f"Vector store count: {vector_store.count()}")
+If search returns 0 and vector store returns 5, the diagnosis is confirmed.
+
+Two Separate Fixes Needed
+Fix A — Search returning 0 results
+Your tiered query builder's narrow tier (_text_phrase with bigrams) is still returning zero. The broad tier should be the safety net but it's not firing correctly. Check _execute_tiered_search — the fallback logic isn't working because you're extending all_patents across tiers but not checking per-tier results before proceeding:
+python# services/search_service.py  — add a dedicated broad fallback
+
+def fetch_patents_with_fallback(
+    tokens,  # ExtractedTokens
+    validated_queries: list[str]
+) -> list[PatentRecord]:
+    """
+    Three-stage fallback. Each stage only runs if the previous 
+    returned fewer than MIN_RESULTS patents.
+    """
+    MIN_RESULTS = 15
+
+    # Stage 1: Narrow phrase queries (from Mistral expansion)
+    log.info("Search stage 1: narrow phrase queries")
+    results = fetch_all_patents(validated_queries)
+    log.info(f"Stage 1 returned {len(results)} patents")
+
+    if len(results) >= MIN_RESULTS:
+        return results
+
+    # Stage 2: Single critical token per query (_text_any, no phrase)
+    log.info("Search stage 2: single token broad queries")
+    broad_results = []
+    for token in tokens.critical_tokens[:4]:
+        query_dict = {
+            "_or": [
+                {"_text_any": {"patent_title": token}},
+                {"_text_any": {"patent_abstract": token}},
+            ]
+        }
+        batch = fetch_patents_for_query_dict(query_dict)
+        log.info(f"Token '{token}' → {len(batch)} patents")
+        broad_results.extend(batch)
+
+    results.extend(broad_results)
+    deduped = list({p.patent_id: p for p in results}.values())
+    log.info(f"Stage 2 total: {len(deduped)} patents")
+
+    if len(deduped) >= MIN_RESULTS:
+        return deduped
+
+    # Stage 3: Domain concept only — single word, maximum recall
+    log.info("Search stage 3: domain concept fallback")
+    domain_results = []
+    # Map domain concepts to their single most-recall-friendly term
+    concept_fallback_terms = {
+        "autonomous_vehicle": "autonomous vehicle",
+        "sensor": "infrared sensor",
+        "detection": "detection system",
+        "imaging": "camera system",
+    }
+    for concept in tokens.domain_concepts[:2]:
+        term = concept_fallback_terms.get(concept, concept.replace("_", " "))
+        query_dict = {"_text_any": {"patent_abstract": term}}
+        batch = fetch_patents_for_query_dict(query_dict)
+        log.info(f"Concept '{concept}' fallback → {len(batch)} patents")
+        domain_results.extend(batch)
+
+    results.extend(domain_results)
+    deduped = list({p.patent_id: p for p in results}.values())
+    log.info(f"Stage 3 total: {len(deduped)} patents")
+    return deduped
+Fix B — Vector store is being used as a corpus instead of a cache
+This is the more critical fix. Your vector_store.py should never be the source of patents for ranking. It should only cache embeddings to avoid recomputing them. The ranking corpus must always come from the live search results:
+python# retrieval/vector_store.py  — clarify the role
+
+class VectorStore:
+    """
+    Embedding CACHE only.
+    
+    CORRECT use:  store embeddings after computing them,
+                  retrieve them to avoid recomputation on repeated queries.
+    
+    WRONG use:    querying the store as the patent search corpus.
+                  The corpus always comes from search_service results.
+    """
+    def store_embeddings(
+        self, 
+        patents: list[PatentRecord], 
+        embeddings: np.ndarray
+    ) -> None:
+        """Cache embeddings keyed by patent_id."""
+        for patent, vec in zip(patents, embeddings):
+            self._store[patent.patent_id] = vec
+
+    def get_cached_embeddings(
+        self, 
+        patents: list[PatentRecord]
+    ) -> tuple[list[PatentRecord], list[PatentRecord], np.ndarray]:
+        """
+        Split patents into cached and uncached.
+        Returns: (cached_patents, uncached_patents, cached_vecs)
+        """
+        cached_patents, cached_vecs, uncached_patents = [], [], []
+        for p in patents:
+            if p.patent_id in self._store:
+                cached_patents.append(p)
+                cached_vecs.append(self._store[p.patent_id])
+            else:
+                uncached_patents.append(p)
+        
+        vecs = np.array(cached_vecs) if cached_vecs else np.empty((0, 1024))
+        return cached_patents, uncached_patents, vecs
+Update the pipeline to never query the vector store for patents:
+python# orchestrator/patent_pipeline.py  — corrected embedding block
+
+def run_pipeline(query: str) -> PipelineResult:
+    # 1. Expand + validate
+    expanded, tokens = expand_query(query, mistral)
+    validated = validate_queries(expanded, tokens)
+
+    # 2. Search — always the source of truth for the corpus
+    raw_patents = fetch_patents_with_fallback(tokens, validated)
+    patents = dedup_service.deduplicate(raw_patents)
+    log.info(f"Corpus: {len(patents)} unique patents from live search")
+
+    if not patents:
+        log.error("Search returned 0 patents after all fallback stages")
+        return PipelineResult(query=query, error="No patents found")
+
+    # 3. Embed — use cache for known patents, compute for new ones
+    cached_p, uncached_p, cached_vecs = vector_store.get_cached_embeddings(patents)
+
+    if uncached_p:
+        new_vecs = embedding_service.embed_patents(uncached_p, embedding_model)
+        vector_store.store_embeddings(uncached_p, new_vecs)  # cache for next time
+    else:
+        new_vecs = np.empty((0, 1024))
+
+    # Reconstruct full matrix in original patent order
+    all_vecs_map = {
+        p.patent_id: v 
+        for p, v in zip(cached_p, cached_vecs)
+    }
+    all_vecs_map.update({
+        p.patent_id: v 
+        for p, v in zip(uncached_p, new_vecs)
+    })
+    doc_vecs = np.array([all_vecs_map[p.patent_id] for p in patents])
+
+    # 4. Query embedding with BGE prefix
+    query_vec = embedding_model.embed_query(query)
+
+    # 5. Score + rank against LIVE search corpus (not vector store)
+    cosine_scores = similarity.cosine_similarity(query_vec, doc_vecs)
+    # ... rest unchanged
+
+The Core Rule Going Forward
+vector_store  =  embedding cache (speed optimization)
+search_service =  patent corpus (always the source of truth)
+These two must never be swapped. Once you apply Fix A and confirm stage 2/3 fallback is returning patents, and Fix B ensures the pipeline ranks those live results rather than the 5 stale ML patents in your store, your output will reflect the actual query domain.

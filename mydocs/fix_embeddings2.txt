@@ -1,0 +1,144 @@
+Three problems are visible immediately from this output.
+Problem 1: Wrong API — You're hitting Lens.org or EPO, not PatentsView
+FI20246315A1, FR3168305A1 are Finnish and French patent numbers in international format. PatentsView only contains USPTO patents with numeric IDs like 10000000. Your search is routing to a different API entirely, or your PatentsView query is returning zero results and something is falling back to an international patent source.
+Check your config.py and search_service.py — confirm the URL is strictly https://search.patentsview.org/api/v1/patent/ and nothing else is being called.
+Problem 2: No abstracts = BM25 scores are all zero
+Every patent shows bm25 = 0 in your ranking. Your build_patent_text() function is receiving records with no patent_abstract field, so BM25 has nothing to tokenize. The cosine scores are also suspiciously uniform (all 0.45x) — that's the embedding model comparing your query against title-only text like "FR 3168305 (A1)", which is meaningless.
+Problem 3: The title field contains the publication number, not a real title
+"FR 3168305 (A1)" is not a patent title — it's the publication number repeated. These records have no usable text content at all. Your PatentRecord schema is mapping the wrong API response fields.
+
+Fix 1: Verify and lock the API endpoint
+python# app/config.py — add explicit guard
+
+class Settings(BaseSettings):
+    patentsview_api_url: str = "https://search.patentsview.org/api/v1/patent/"
+    
+    # Validate on startup — fail fast if misconfigured
+    @validator("patentsview_api_url")
+    def must_be_patentsview(cls, v):
+        if "patentsview.org" not in v:
+            raise ValueError(f"Unexpected API URL: {v}. Must be patentsview.org")
+        return v
+Add a startup diagnostic to main.py:
+python# app/main.py — add before pipeline runs
+
+def verify_api_connectivity():
+    """Confirm PatentsView is reachable and returning US patents."""
+    import requests
+    test_payload = {
+        "q": {"_text_any": {"patent_title": "sensor"}},
+        "f": ["patent_id", "patent_title"],
+        "o": {"size": 1}
+    }
+    resp = requests.post(
+        settings.patentsview_api_url,
+        headers={"X-Api-Key": settings.patentsview_api_key,
+                 "Content-Type": "application/json"},
+        json=test_payload
+    )
+    data = resp.json()
+    patents = data.get("patents", [])
+    if not patents:
+        raise RuntimeError("PatentsView returned no results on connectivity check")
+    pid = patents[0].get("patent_id", "")
+    if not pid.isdigit():
+        raise RuntimeError(f"Unexpected patent_id format: {pid} — wrong API?")
+    log.info(f"API connectivity OK. Sample patent_id: {pid}")
+
+Fix 2: Request the correct fields including abstract
+This is likely why you have no content. Your patent_fields in config probably doesn't include patent_abstract, or the field name is wrong for the API version you're hitting.
+python# app/config.py
+
+class Settings(BaseSettings):
+    patent_fields: list[str] = [
+        "patent_id",
+        "patent_title", 
+        "patent_abstract",   # ← critical — must be in this list
+        "patent_type",
+        "patent_date",
+    ]
+Verify the exact field names against the PatentsView API docs. The fields endpoint at https://search.patentsview.org/api/v1/fields/patent returns every valid field name — fetch it once and confirm:
+python# Run this once as a diagnostic script
+
+import requests
+resp = requests.get("https://search.patentsview.org/api/v1/fields/patent")
+fields = resp.json()
+# Look for abstract-related field names
+abstract_fields = [f for f in fields if "abstract" in f.lower()]
+print(abstract_fields)
+
+Fix 3: Add a response validator to catch empty records early
+python# services/search_service.py — update _fetch_all_for_query
+
+def _validate_patent_record(raw: dict) -> bool:
+    """
+    Reject records that have no usable text content.
+    These will produce meaningless embeddings and waste compute.
+    """
+    patent_id = raw.get("patent_id", "")
+    title = raw.get("patent_title", "")
+    abstract = raw.get("patent_abstract", "")
+
+    # Reject non-USPTO patent IDs (should be numeric)
+    if not patent_id.replace("-", "").isdigit():
+        log.warning(f"Non-USPTO patent_id rejected: {patent_id}")
+        return False
+
+    # Reject records where title = publication number (no real content)
+    if title == patent_id or title.startswith(patent_id[:4]):
+        log.warning(f"Title looks like publication number, rejected: {title}")
+        return False
+
+    # Reject records with no searchable text
+    if not title and not abstract:
+        log.warning(f"No text content in record: {patent_id}")
+        return False
+
+    return True
+
+
+# In _fetch_all_for_query, replace the existing conversion block:
+page_records: list[PatentRecord] = []
+for raw in raw_page:
+    if not _validate_patent_record(raw):
+        continue          # skip bad records before schema validation
+    try:
+        page_records.append(PatentRecord(**raw))
+    except Exception as exc:
+        log.warning("Schema validation failed",
+                    extra={"error": str(exc),
+                           "patent_id": raw.get("patent_id")})
+
+Fix 4: Guard against empty abstract in BM25 and embedding
+Even after fixing the source, add defensive guards in both retrieval components so future bad records don't silently corrupt scores:
+python# services/embedding_service.py
+
+def build_patent_text(patent: PatentRecord) -> str:
+    title = (patent.patent_title or "").strip()
+    abstract = (patent.patent_abstract or "").strip()
+
+    # Guard: if both are empty, flag it — don't embed garbage
+    if not title and not abstract:
+        log.warning(f"Patent {patent.patent_id} has no text — embedding will be noise")
+        return f"patent {patent.patent_id}"  # minimal placeholder
+
+    if not abstract:
+        log.debug(f"Patent {patent.patent_id} has no abstract — title only")
+        return f"{title}. {title}"  # double title as fallback weight
+
+    return f"{title}. {title}. {abstract}"
+
+
+# retrieval/bm25_ranker.py
+
+def build_index(patents: list[PatentRecord]) -> BM25Okapi:
+    corpus = []
+    for p in patents:
+        text = f"{p.patent_title or ''} {p.patent_abstract or ''}".strip()
+        if not text:
+            text = f"patent {p.patent_id}"  # prevent empty token list crash
+        corpus.append(text.lower().split())
+    return BM25Okapi(corpus)
+
+Immediate Next Step
+Before anything else, run the connectivity diagnostic and the fields endpoint check. Those two will tell you definitively whether you're hitting the right API and whether patent_abstract is being requested and returned. If the connectivity check returns FR/FI format IDs, something upstream is overriding your API URL — possibly an environment variable, a cached config, or a fallback in your search service that's routing to a different source.Sonnet 4.6

@@ -1,0 +1,180 @@
+Now the picture is complete. You're not hitting PatentsView at all — you're running entirely on the EPO OPS API, which returns international patents (FR, DE, US20xx format) with no abstracts in the default response. This is why every query returns the same French patents with no titles, no abstracts, and BM25 = 0.
+
+Confirm the Routing Issue First
+Add this single diagnostic print at the very top of _fetch_all_for_query:
+pythondef _fetch_all_for_query(query: dict) -> list[PatentRecord]:
+    log.info(f"SEARCH ROUTING TO: {url}")  # print the actual URL being called
+    print(f"DEBUG URL: {url}")
+My strong suspicion is that somewhere in your fallback chain, the code is falling through to an EPO client when PatentsView returns zero results. Search your codebase for any of these:
+bashgrep -r "epo" services/ orchestrator/ app/ --include="*.py" -l
+grep -r "ops.epo.org" . --include="*.py"
+grep -r "EPO" . --include="*.py" -l
+
+The Architectural Fix: Strict Source Separation
+Right now your pipeline has an implicit fallback to EPO when PatentsView fails. These two APIs need to be completely separated with explicit routing, never silent fallback:
+python# services/search_service.py — add source flag
+
+from enum import Enum
+
+class PatentSource(Enum):
+    PATENTSVIEW = "patentsview"
+    EPO = "epo"          # future: when you want international patents
+    LENS = "lens"        # future: open access
+
+def fetch_patents_with_fallback(
+    tokens,
+    validated_queries: list[str],
+    source: PatentSource = PatentSource.PATENTSVIEW  # explicit, never implicit
+) -> list[PatentRecord]:
+    """
+    Source is always explicit. Never silently falls back to a 
+    different API — logs a clear error instead.
+    """
+    if source == PatentSource.PATENTSVIEW:
+        return _fetch_from_patentsview(tokens, validated_queries)
+    elif source == PatentSource.EPO:
+        return _fetch_from_epo(tokens, validated_queries)
+    else:
+        raise ValueError(f"Unknown patent source: {source}")
+
+
+def _fetch_from_patentsview(tokens, validated_queries) -> list[PatentRecord]:
+    """USPTO patents only. Returns [] with clear log if API unreachable."""
+    MIN_RESULTS = 15
+    
+    # Stage 1: phrase queries
+    results = fetch_all_patents(validated_queries)
+    log.info(f"PatentsView stage 1: {len(results)} results")
+    if len(results) >= MIN_RESULTS:
+        return results
+
+    # Stage 2: single token broad
+    for token in tokens.critical_tokens[:4]:
+        batch = fetch_patents_for_query_dict({
+            "_or": [
+                {"_text_any": {"patent_title": token}},
+                {"_text_any": {"patent_abstract": token}},
+            ]
+        })
+        results.extend(batch)
+        log.info(f"Token '{token}': {len(batch)} results")
+
+    deduped = list({p.patent_id: p for p in results}.values())
+    log.info(f"PatentsView stage 2: {len(deduped)} total")
+    if deduped:
+        return deduped
+
+    # Stage 3: domain fallback
+    for concept in tokens.domain_concepts[:2]:
+        term = concept.replace("_", " ")
+        batch = fetch_patents_for_query_dict({
+            "_text_any": {"patent_abstract": term}
+        })
+        results.extend(batch)
+
+    deduped = list({p.patent_id: p for p in results}.values())
+    log.info(f"PatentsView stage 3: {len(deduped)} total")
+
+    if not deduped:
+        # Hard stop — do NOT fall through to EPO silently
+        log.error("PatentsView returned 0 patents across all stages. "
+                  "Check API key, query construction, and connectivity.")
+    return deduped
+
+EPO is Returning No Abstracts — Fix the Field Request
+When you do want to use EPO results, the default EPO OPS response only returns bibliographic data. You need to explicitly request the abstract constituent:
+python# models/epo_client.py — request abstracts explicitly
+
+def search_patents(self, query: str) -> list[PatentRecord]:
+    """
+    EPO OPS requires explicit constituent requests for each data type.
+    Default response has NO abstract — must request 'abstract' separately.
+    """
+    # Step 1: Search for patent IDs
+    search_url = f"{self.base_url}/rest-services/published-data/search"
+    params = {"q": query, "Range": "1-25"}
+    search_resp = self._authenticated_get(search_url, params)
+    patent_ids = self._extract_ids(search_resp)
+
+    # Step 2: Fetch full record WITH abstract for each ID
+    records = []
+    for pid in patent_ids:
+        # 'biblio,abstract' constituent returns both bibliographic + abstract
+        detail_url = (
+            f"{self.base_url}/rest-services/published-data/"
+            f"publication/epodoc/{pid}/biblio,abstract"
+        )
+        detail_resp = self._authenticated_get(detail_url)
+        record = self._parse_full_record(detail_resp, pid)
+        if record:
+            records.append(record)
+    return records
+
+def _parse_full_record(self, response: dict, pid: str) -> PatentRecord | None:
+    """Extract title + abstract from EPO bibliographic+abstract response."""
+    try:
+        biblio = response["ops:world-patent-data"]["exchange-documents"][
+            "exchange-document"]["bibliographic-data"]
+        
+        # Title — EPO returns list of titles by language, take English
+        titles = biblio.get("invention-title", [])
+        if isinstance(titles, dict):
+            titles = [titles]
+        title = next(
+            (t.get("$", "") for t in titles if t.get("@lang") == "en"),
+            titles[0].get("$", pid) if titles else pid
+        )
+
+        # Abstract — in separate 'abstract' node
+        abstracts = response["ops:world-patent-data"]["exchange-documents"][
+            "exchange-document"].get("abstract", [])
+        if isinstance(abstracts, dict):
+            abstracts = [abstracts]
+        abstract = next(
+            (a.get("p", {}).get("$", "") for a in abstracts 
+             if a.get("@lang") == "en"),
+            ""
+        )
+
+        return PatentRecord(
+            patent_id=pid,
+            patent_title=title,
+            patent_abstract=abstract,
+            patent_type="",
+            patent_date=None,
+        )
+    except (KeyError, TypeError) as e:
+        log.warning(f"Failed to parse EPO record {pid}: {e}")
+        return None
+
+PatentsView Field Name Audit
+Since PatentsView is returning nothing, verify the exact field names right now with this one-off script:
+python# run once: python scripts/audit_patentsview_fields.py
+
+import requests, os
+
+API_KEY = os.getenv("patentsview_api_key")
+URL = "https://search.patentsview.org/api/v1/patent/"
+
+# Minimal test — known-good patent ID
+payload = {
+    "q": {"_eq": {"patent_id": "10000000"}},
+    "f": ["patent_id", "patent_title", "patent_abstract", 
+          "patent_type", "patent_date"]
+}
+resp = requests.post(
+    URL,
+    headers={"X-Api-Key": API_KEY, "Content-Type": "application/json"},
+    json=payload
+)
+print(f"Status: {resp.status_code}")
+data = resp.json()
+patents = data.get("patents", [])
+if patents:
+    print("Fields returned:", list(patents[0].keys()))
+    print("Abstract present:", bool(patents[0].get("patent_abstract")))
+    print("Sample:", patents[0])
+else:
+    print("No results. Raw response:", data)
+Run this before anything else. If it returns a result with patent_abstract populated, PatentsView is working and the routing bug is the only issue. If it returns nothing, your API key or field names are wrong.
+The core fix is one line in your pipeline — make PatentSource.PATENTSVIEW explicit and never allow silent fallback to EPO. Right now EPO is answering every query because PatentsView is either failing silently or not being called at all.

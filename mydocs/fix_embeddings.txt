@@ -1,0 +1,249 @@
+Diagnosing the Embedding Problem
+The issue is almost certainly one of these three things, in order of likelihood:
+1. You're embedding the wrong text
+If you're only embedding patent titles, "Federated learning system for distributed model training" contains "system", "distributed", "learning" — all of which have surface-level overlap with autonomous systems vocabulary in the general embedding space. BGE-large is trained on general text, so "distributed model" and "distributed sensor data" land close together in vector space even though they're completely different domains.
+2. Your embedding input isn't being concatenated correctly
+BGE-large-en-v1.5 has a specific input format requirement. For retrieval, the query must be prefixed with "Represent this sentence for searching relevant passages: " but the documents (patents) should NOT have this prefix. If both are embedded the same way, similarity scores become unreliable.
+3. The 0.45 threshold is meaningless without calibration
+0.45 cosine similarity with BGE-large on domain-specific technical text is not a reliable cutoff. BGE embeddings on out-of-domain text routinely score 0.4-0.6 even for completely unrelated documents. You need a domain-calibrated threshold, not a fixed one.
+
+Fix 1: Correct BGE-large Input Format
+python# models/embedding_model.py  (corrected)
+
+from sentence_transformers import SentenceTransformer
+import numpy as np
+
+class EmbeddingModel:
+    # BGE-large requires this prefix on QUERIES only, not documents
+    QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+
+    def __init__(self, model_name: str = "BAAI/bge-large-en-v1.5"):
+        self.model = SentenceTransformer(model_name)
+
+    def embed_query(self, query: str) -> np.ndarray:
+        """Embed a search query — applies BGE query prefix."""
+        prefixed = self.QUERY_PREFIX + query
+        vec = self.model.encode(
+            [prefixed],
+            normalize_embeddings=True,
+            batch_size=1
+        )
+        return vec[0]  # shape: (1024,)
+
+    def embed_documents(self, texts: list[str]) -> np.ndarray:
+        """Embed patent documents — NO prefix for documents."""
+        return self.model.encode(
+            texts,
+            normalize_embeddings=True,
+            batch_size=32,
+            show_progress_bar=len(texts) > 100
+        )
+
+Fix 2: Embed Title + Abstract Together, Not Just Title
+python# services/embedding_service.py  (corrected)
+
+from models.schemas import PatentRecord
+from models.embedding_model import EmbeddingModel
+import numpy as np
+
+def build_patent_text(patent: PatentRecord) -> str:
+    """
+    Concatenate title + abstract for embedding.
+    Title alone is insufficient — abstract contains the technical substance.
+    Weight title 2x by repeating it (proven to improve retrieval quality).
+    """
+    title = patent.patent_title or ""
+    abstract = patent.patent_abstract or ""
+
+    if abstract:
+        # Repeat title to give it higher weight in the embedding
+        return f"{title}. {title}. {abstract}"
+    return title
+
+def embed_patents(
+    patents: list[PatentRecord],
+    model: EmbeddingModel
+) -> np.ndarray:
+    """Returns normalized embedding matrix, shape (n_patents, 1024)."""
+    texts = [build_patent_text(p) for p in patents]
+    if not texts:
+        return np.empty((0, 1024))
+    return model.embed_documents(texts)
+
+def embed_query_for_retrieval(query: str, model: EmbeddingModel) -> np.ndarray:
+    """Embed query with BGE prefix for asymmetric retrieval."""
+    return model.embed_query(query)
+
+Fix 3: Replace Fixed Threshold with Dynamic Calibration
+python# retrieval/similarity.py  (updated)
+
+import numpy as np
+from utils.logger import get_logger
+
+log = get_logger(__name__)
+
+def cosine_similarity(
+    query_vec: np.ndarray,
+    doc_vecs: np.ndarray
+) -> np.ndarray:
+    """Both inputs must be L2-normalized. Returns shape (n_docs,)."""
+    return doc_vecs @ query_vec
+
+def compute_dynamic_threshold(
+    scores: np.ndarray,
+    strategy: str = "mean_plus_std"
+) -> float:
+    """
+    Compute a data-driven threshold rather than using a fixed value.
+
+    Strategies:
+    - mean_plus_std : mean + 0.5*std  (keeps top ~30% typically)
+    - top_k_pct     : score at 80th percentile
+    - elbow         : finds the sharpest drop in sorted scores
+    """
+    if len(scores) == 0:
+        return 0.0
+
+    if strategy == "mean_plus_std":
+        threshold = float(np.mean(scores) + 0.5 * np.std(scores))
+
+    elif strategy == "top_k_pct":
+        threshold = float(np.percentile(scores, 80))
+
+    elif strategy == "elbow":
+        sorted_scores = np.sort(scores)[::-1]
+        diffs = np.diff(sorted_scores)
+        elbow_idx = int(np.argmin(diffs))  # sharpest drop
+        threshold = float(sorted_scores[elbow_idx])
+
+    else:
+        threshold = 0.45  # fallback to fixed
+
+    log.info("Dynamic threshold computed", extra={
+        "strategy": strategy,
+        "threshold": round(threshold, 4),
+        "score_mean": round(float(np.mean(scores)), 4),
+        "score_std": round(float(np.std(scores)), 4),
+        "score_max": round(float(np.max(scores)), 4),
+    })
+    return threshold
+
+def filter_by_threshold(
+    scores: np.ndarray,
+    threshold: float
+) -> np.ndarray:
+    """Returns indices of patents above the threshold, sorted descending."""
+    above = np.where(scores >= threshold)[0]
+    return above[np.argsort(scores[above])[::-1]]
+
+Fix 4: Add a Relevance Sanity Check via Claude
+Even after fixing embeddings, add a lightweight post-filter before the full Claude comparison. This catches cases where cosine similarity still passes irrelevant patents:
+python# services/relevance_filter.py
+
+from models.claude_client import ClaudeClient
+from models.schemas import RankedPatent
+from utils.logger import get_logger
+import json
+
+log = get_logger(__name__)
+
+FILTER_PROMPT = """You are a patent relevance classifier.
+
+Query domain: {domain_concepts}
+Original query: {original_query}
+
+For each patent below, respond with a JSON array of objects:
+{{"patent_id": "...", "relevant": true/false, "reason": "one sentence"}}
+
+Only mark relevant=true if the patent is genuinely in the same 
+technical domain as the query. Be strict.
+
+Patents:
+{patent_list}
+
+Return ONLY the JSON array, no other text."""
+
+def filter_irrelevant_patents(
+    query: str,
+    domain_concepts: list[str],
+    ranked: list[RankedPatent],
+    client: ClaudeClient,
+    max_to_filter: int = 20
+) -> list[RankedPatent]:
+    """
+    Use Claude as a lightweight binary relevance filter before 
+    the full comparison stage. Runs on top-N only to control cost.
+    """
+    candidates = ranked[:max_to_filter]
+
+    patent_list = "\n".join(
+        f"- ID: {r.patent.patent_id} | Title: {r.patent.patent_title}"
+        for r in candidates
+    )
+
+    prompt = FILTER_PROMPT.format(
+        original_query=query,
+        domain_concepts=", ".join(domain_concepts),
+        patent_list=patent_list
+    )
+
+    try:
+        raw = client.complete(
+            system="You are a strict patent relevance classifier. Return only valid JSON.",
+            user=prompt,
+            max_tokens=1000
+        )
+        decisions = json.loads(raw)
+        relevant_ids = {
+            d["patent_id"] for d in decisions if d.get("relevant")
+        }
+        filtered = [r for r in candidates if r.patent.patent_id in relevant_ids]
+        log.info(f"Relevance filter: {len(candidates)} → {len(filtered)} patents")
+        return filtered
+
+    except Exception as e:
+        log.warning(f"Relevance filter failed ({e}), returning unfiltered")
+        return candidates
+
+Updated Pipeline Order
+python# orchestrator/patent_pipeline.py  (updated retrieval block)
+
+def run_pipeline(query: str) -> PipelineResult:
+    # 1. Expand + validate (existing)
+    expanded, tokens = expand_query(query, mistral)
+    validated = validate_queries(expanded, tokens)
+
+    # 2. Search (existing tiered search)
+    raw_patents = _execute_tiered_search(query, validated, tokens)
+    patents = dedup_service.deduplicate(raw_patents)
+    log.info(f"{len(patents)} unique patents after dedup")
+
+    # 3. Embed — USE SEPARATE QUERY/DOCUMENT EMBEDDING
+    query_vec = embedding_model.embed_query(query)          # with BGE prefix
+    doc_vecs  = embedding_service.embed_patents(patents, embedding_model)  # no prefix
+
+    # 4. Score
+    cosine_scores = similarity.cosine_similarity(query_vec, doc_vecs)
+    bm25_index    = bm25_ranker.build_index(patents)
+    bm25_scores   = np.array(bm25_ranker.get_scores(bm25_index, query))
+
+    # 5. Hybrid rank
+    hybrid_scores = ranking_service.hybrid_rank(cosine_scores, bm25_scores)
+
+    # 6. Dynamic threshold — not fixed 0.45
+    threshold = similarity.compute_dynamic_threshold(
+        hybrid_scores, strategy="elbow"
+    )
+    top_indices = similarity.filter_by_threshold(hybrid_scores, threshold)
+    ranked = [RankedPatent(patent=patents[i], ...) for i in top_indices]
+
+    # 7. NEW: Relevance sanity filter before Claude
+    ranked = relevance_filter.filter_irrelevant_patents(
+        query, tokens.domain_concepts, ranked, claude
+    )
+
+    # 8. Compare + Report (existing)
+    ...
+
+Why This Will Fix Your Results
+The BGE prefix fix alone will have the largest impact — without it, query and document embeddings are computed in different vector spaces and similarity scores are unreliable regardless of threshold. The dynamic threshold removes the hardcoded 0.45 which was passing federated learning patents as "relevant" to infrared sensors. The relevance filter adds a cheap Claude binary check that catches any remaining drift before the expensive full comparison runs.Sonnet 4.6

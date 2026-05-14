@@ -1,0 +1,6 @@
+Great to hear it's working! It was a solid debugging journey — routing bugs, wrong API sources, EPO auth, CQL construction, embedding format issues. You worked through each one systematically.
+A few things worth doing now that the core pipeline is stable:
+Immediate housekeeping — rotate both API keys that appeared in this conversation (PatentsView DSSVf6t3... and EPO wAZaXr2azN7S0y5NFZLuTlUg1HM8At13t6bAsEvYTYZ6DG8e). They've been visible in chat. Generate new ones from the respective developer portals before pushing anything to git.
+Next logical steps for the pipeline — the embedding quality and dynamic threshold work we discussed earlier is still pending. Now that you're getting real patents with actual abstracts, the BGE query prefix fix and compute_dynamic_threshold with the elbow strategy will have meaningful data to work against. That's the natural next milestone.
+After that — the Claude comparison and report stages are the final pieces before you have an end-to-end working system, which puts you close to the FastAPI SaaS deployment you've been planning.
+Good work pushing through a lot of tricky integration issues. Feel free to come back when you hit the next stage.Sonnet 4.6

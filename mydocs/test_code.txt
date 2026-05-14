@@ -1,0 +1,294 @@
+Your test code works because it does two separate calls — search for IDs first, then fetch full biblio per ID. Your current epo_search_service.py is likely trying to get everything in one call. Here's exactly what needs to change in your project structure.
+
+What Your Test Code Does Right
+Step 1: POST /auth/accesstoken          → get Bearer token
+Step 2: GET /search/biblio?q=...        → get patent IDs only
+Step 3: GET /publication/epodoc/{id}/biblio → get title + abstract per ID
+Your project needs to mirror this exactly, with the token cached so it's not re-fetched on every search.
+
+models/epo_client.py — Token-caching HTTP wrapper
+python# models/epo_client.py
+
+import time
+import requests
+from requests.auth import HTTPBasicAuth
+from lxml import etree
+from app.config import settings
+from utils.logger import get_logger
+
+log = get_logger(__name__)
+
+NAMESPACES = {
+    "ops":      "http://ops.epo.org",
+    "exchange": "http://www.epo.org/exchange",
+}
+
+class EPOClient:
+    """
+    Thin wrapper around EPO OPS 3.2.
+    Handles auth token lifecycle — token is cached and reused
+    until it expires (EPO tokens last 20 minutes).
+    """
+    BASE = "https://ops.epo.org/3.2/rest-services"
+
+    def __init__(self):
+        self._token: str | None = None
+        self._token_expiry: float = 0.0   # epoch seconds
+
+    # ------------------------------------------------------------------
+    # Auth
+    # ------------------------------------------------------------------
+
+    def _get_token(self) -> str:
+        """Return cached token, or fetch a new one if expired."""
+        if self._token and time.time() < self._token_expiry - 30:
+            return self._token
+
+        log.info("EPO: requesting new access token")
+        resp = requests.post(
+            "https://ops.epo.org/3.2/auth/accesstoken",
+            auth=HTTPBasicAuth(
+                settings.epo_consumer_key,
+                settings.epo_consumer_secret,
+            ),
+            data={"grant_type": "client_credentials"},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"EPO auth failed: {resp.status_code} — {resp.text[:200]}"
+            )
+        data = resp.json()
+        self._token = data["access_token"]
+        # EPO tokens expire in 1200s (20 min); cache with 30s safety margin
+        self._token_expiry = time.time() + int(data.get("expires_in", 1200))
+        log.info("EPO: token acquired, valid for ~20 min")
+        return self._token
+
+    def _headers(self) -> dict:
+        return {
+            "Authorization": f"Bearer {self._get_token()}",
+            "Accept": "application/xml",
+        }
+
+    # ------------------------------------------------------------------
+    # Step 2 — Search: returns list of epodoc IDs
+    # ------------------------------------------------------------------
+
+    def search(self, cql_query: str, max_results: int = 25) -> list[str]:
+        """
+        Search EPO and return epodoc-format patent IDs.
+        Returns: ["US.20260127435.A1", "DE.102024210701.A1", ...]
+        """
+        url = f"{self.BASE}/published-data/search/biblio"
+        params = {
+            "q": cql_query,
+            "Range": f"1-{min(max_results, 100)}",
+        }
+        log.info(f"EPO search: {cql_query}")
+        resp = requests.get(url, headers=self._headers(),
+                            params=params, timeout=15)
+
+        if resp.status_code == 404:
+            log.warning(f"EPO search returned 404 (no results): {cql_query}")
+            return []
+        if resp.status_code != 200:
+            log.error(f"EPO search failed: {resp.status_code} — {resp.text[:300]}")
+            return []
+
+        root = etree.fromstring(resp.content)
+        docs = root.xpath("//exchange:exchange-document",
+                          namespaces=NAMESPACES)
+
+        ids = []
+        for doc in docs:
+            country    = doc.get("country", "")
+            doc_number = doc.get("doc-number", "")
+            kind       = doc.get("kind", "")
+            if country and doc_number and kind:
+                ids.append(f"{country}.{doc_number}.{kind}")
+
+        log.info(f"EPO search: {len(ids)} patent IDs found")
+        return ids
+
+    # ------------------------------------------------------------------
+    # Step 3 — Fetch full record: title + abstract per ID
+    # ------------------------------------------------------------------
+
+    def fetch_biblio(self, epodoc_id: str) -> dict | None:
+        """
+        Fetch title + abstract for one epodoc ID.
+        Returns: {"patent_id": ..., "title": ..., "abstract": ...}
+        or None on failure.
+
+        Mirrors your test code Steps 4-5 exactly.
+        """
+        url = (f"{self.BASE}/published-data/publication"
+               f"/epodoc/{epodoc_id}/biblio")
+
+        resp = requests.get(url, headers=self._headers(), timeout=10)
+
+        if resp.status_code != 200:
+            log.warning(f"EPO biblio fetch failed for {epodoc_id}: "
+                        f"{resp.status_code}")
+            return None
+
+        try:
+            root = etree.fromstring(resp.content)
+
+            # Title — prefer English, fall back to first available
+            title_nodes = root.xpath(
+                "//exchange:invention-title",
+                namespaces=NAMESPACES
+            )
+            title = "NO TITLE FOUND"
+            for node in title_nodes:
+                if node.get("lang", "").lower() == "en" and node.text:
+                    title = node.text.strip()
+                    break
+            if title == "NO TITLE FOUND" and title_nodes:
+                title = (title_nodes[0].text or "").strip() or "NO TITLE FOUND"
+
+            # Abstract — mirrors your test code exactly
+            abstract_nodes = root.xpath(
+                "//exchange:abstract//exchange:p",
+                namespaces=NAMESPACES
+            )
+            abstract_parts = [
+                n.text.strip() for n in abstract_nodes if n.text
+            ]
+            abstract = " ".join(abstract_parts) or "NO ABSTRACT FOUND"
+
+            return {
+                "patent_id": epodoc_id,
+                "title":     title,
+                "abstract":  abstract,
+            }
+
+        except Exception as e:
+            log.error(f"EPO parse error for {epodoc_id}: {e}")
+            return None
+
+services/epo_search_service.py — Business logic layer
+python# services/epo_search_service.py
+
+from models.epo_client import EPOClient
+from models.schemas import PatentRecord
+from utils.logger import get_logger
+
+log = get_logger(__name__)
+
+# Module-level singleton — one token shared across all calls in a session
+_epo_client = EPOClient()
+
+
+def _build_cql(keyword_terms: list[str]) -> str:
+    """
+    Build CQL from short keyword terms only.
+
+    Correct input : ["infrared", "lane detection", "autonomous vehicle"]
+    Wrong input   : ["Method for lane detection comprising infrared steps"]
+
+    CQL reference:
+      ti=term        → title contains term
+      ab=term        → abstract contains term
+      "two words"    → phrase search (wrap multi-word in quotes)
+      AND            → all conditions must match
+    """
+    parts = []
+    for term in keyword_terms:
+        quoted = f'"{term}"' if " " in term else term
+        parts.append(f"(ti={quoted} OR ab={quoted})")
+    return " AND ".join(parts)
+
+
+def epo_fetch_by_keywords(keyword_terms: list[str]) -> list[PatentRecord]:
+    """
+    Full two-step EPO fetch matching your test code pattern.
+
+    Step 1: search CQL → get patent IDs
+    Step 2: fetch biblio per ID → get title + abstract
+    Step 3: convert to PatentRecord objects
+
+    keyword_terms must be short technical terms from token_extractor,
+    NOT full Mistral-expanded natural language phrases.
+    """
+    if not keyword_terms:
+        log.warning("epo_fetch_by_keywords called with empty terms")
+        return []
+
+    # Step 1 — build CQL and search
+    cql = _build_cql(keyword_terms)
+    log.info(f"EPO CQL: {cql}")
+    patent_ids = _epo_client.search(cql, max_results=25)
+
+    if not patent_ids:
+        # Retry with relaxed CQL — OR instead of AND
+        log.warning("No results with AND query, retrying with OR")
+        relaxed_parts = []
+        for term in keyword_terms:
+            quoted = f'"{term}"' if " " in term else term
+            relaxed_parts.append(f"(ti={quoted} OR ab={quoted})")
+        relaxed_cql = " OR ".join(relaxed_parts)
+        log.info(f"EPO relaxed CQL: {relaxed_cql}")
+        patent_ids = _epo_client.search(relaxed_cql, max_results=25)
+
+    if not patent_ids:
+        log.error(f"EPO returned 0 patents for terms: {keyword_terms}")
+        return []
+
+    # Step 2 — fetch full biblio per ID
+    records: list[PatentRecord] = []
+    for pid in patent_ids:
+        biblio = _epo_client.fetch_biblio(pid)
+        if not biblio:
+            continue
+        if biblio["abstract"] == "NO ABSTRACT FOUND":
+            log.debug(f"Skipping {pid} — no abstract (unusable for embedding)")
+            continue
+        try:
+            records.append(PatentRecord(
+                patent_id       = biblio["patent_id"],
+                patent_title    = biblio["title"],
+                patent_abstract = biblio["abstract"],
+                patent_type     = "",      # EPO doesn't return type in biblio
+                patent_date     = None,
+            ))
+        except Exception as e:
+            log.warning(f"PatentRecord build failed for {pid}: {e}")
+
+    log.info(f"EPO fetch complete: {len(records)} usable records "
+             f"(with abstracts) from {len(patent_ids)} IDs")
+    return records
+
+app/config.py — Add EPO secret
+pythonclass Settings(BaseSettings):
+    # PatentsView
+    patentsview_api_key:  str = ""
+
+    # EPO OPS — both key and secret required
+    epo_consumer_key:    str = ""
+    epo_consumer_secret: str = ""   # ← add this
+
+    @validator("patentsview_api_key", "epo_consumer_key",
+               "epo_consumer_secret", pre=True)
+    def strip_whitespace(cls, v):
+        return (v or "").strip()
+.env
+bashepo_consumer_key=wAZaXr2azN7S0y5NFZLuTlUg1HM8At13t6bAsEvYTYZ6DG8e
+epo_consumer_secret=0M3B4sjE3Xv1GAEzHa8rj4IwCh1YCl7woctGlbj11hjGrX29HDjA89J2ZfYO9X7m
+
+How it connects to your pipeline
+python# orchestrator/patent_pipeline.py — _search_epo (no changes needed to signature)
+
+def _search_epo(tokens, validated_queries: list[str]) -> list[PatentRecord]:
+    from services.epo_search_service import epo_fetch_by_keywords
+
+    # Pass critical_tokens — short terms, not Mistral phrases
+    keyword_terms = tokens.critical_tokens[:4]
+    log.info(f"EPO search keywords: {keyword_terms}")
+
+    results = epo_fetch_by_keywords(keyword_terms)
+    log.info(f"EPO returned {len(results)} usable patents")
+    return results
+The key difference from your current code is the singleton _epo_client in epo_search_service.py — the token is fetched once and reused for the entire session, which matches how your test code works but prevents the re-auth overhead on every query. The two-step search→biblio pattern mirrors your test code exactly, and skipping records with no abstract ensures nothing empty reaches the embedding model.Sonnet 4.6

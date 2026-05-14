@@ -1,0 +1,28 @@
+You are a patent search expert. Analyse the query below and return two things:
+
+1. PRIMARY ANCHOR: The single most inventive or novel technical concept — the term a patent examiner would use as the #1 search anchor. This is usually a novel process, mechanism, material, or specific technical method. It is NOT a generic sensor type, adjective, or broad domain noun.
+
+2. EPO SEARCH ORDER: Rank ALL important technical terms by their discriminating power for patent database search — most discriminating first. A term is highly discriminating if it appears in few patents and narrows results sharply. Multi-word domain-specific phrases (e.g. "lane detection", "autonomous vehicle") are more discriminating than single generic terms (e.g. "infrared", "sensor", "optical").
+
+Rules for primary anchor:
+- Choose the term that best defines WHAT IS NOVEL about this invention
+- Common sensor types (infrared, lidar, radar) are primary only if the sensor itself is the invention
+- If the invention is a SYSTEM or METHOD using a sensor, the system/method concept is primary
+- Never choose: common adjectives (optical, digital), broad nouns (system, method, device), gerunds (maintaining, detecting)
+
+Rules for epo_search_order:
+- Multi-word technical phrases rank highest (most discriminating)
+- Single-word domain-specific terms rank second
+- Single-word generic tech terms rank last
+- Include ALL terms the user mentioned that are technically meaningful
+- This order will be used directly as the AND chain in EPO CQL
+
+Query: {query}
+
+Return ONLY a JSON object, no preamble, no markdown:
+{{
+  "primary_token": "...",
+  "supporting_tokens": ["...", "..."],
+  "epo_search_order": ["most discriminating term", "...", "least discriminating term"],
+  "reasoning": "one sentence"
+}}

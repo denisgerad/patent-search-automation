@@ -98,34 +98,24 @@ def _search(
 
 def _search_epo(tokens, validated_queries: list[str]) -> list:
     """
-    Uses tokens.epo_search_order (most discriminating term first) so EPO's
-    AND chain filters on the most specific concept before less specific ones.
-    Falls back to critical_tokens / long words if epo_search_order is empty.
+    Passes the full ExtractedTokens to epo_fetch_by_keywords so the tiered
+    CQL builder can use primary_anchor and concept_groups for precise queries.
     """
     from services.epo_search_service import epo_fetch_by_keywords
 
-    # Primary: use epo_search_order set by Claude pre-call or specificity sort
-    keyword_terms: list[str] = list(getattr(tokens, "epo_search_order", []))[:4]
-
-    # Backward compat fallbacks
-    if not keyword_terms:
-        keyword_terms = list(tokens.critical_tokens[:4])
-    if not keyword_terms and validated_queries:
-        keyword_terms = [
-            w for w in validated_queries[0].lower().split() if len(w) > 5
-        ][:4]
-
     logger.info(
-        "EPO CQL order (most→least discriminating): %s", keyword_terms,
+        "EPO primary anchor: '%s' (concept=%s)",
+        getattr(tokens, "primary_anchor", ""),
+        getattr(tokens, "primary_concept", ""),
     )
-    results = epo_fetch_by_keywords(keyword_terms)
+    results = epo_fetch_by_keywords(tokens)
     logger.info("EPO returned %d patents", len(results))
 
     if not results:
         logger.warning(
-            "EPO returned 0 patents. Keywords: %s — "
-            "consider broadening taxonomy in token_extractor.py",
-            keyword_terms,
+            "EPO returned 0 patents. Primary anchor: '%s' — "
+            "consider adding synonyms to taxonomy in token_extractor.py",
+            getattr(tokens, "primary_anchor", ""),
         )
     return results
 
@@ -266,6 +256,25 @@ def run_pipeline(
     expanded_queries, tokens, _ = query_expansion.expand_query(query, mistral_client)
     logger.info("Stage 1 done: %d queries (original + %d expanded)",
                 len(expanded_queries), len(expanded_queries) - 1)
+
+    # Warn immediately if taxonomy had no match
+    if getattr(tokens, "taxonomy_miss", False):
+        logger.warning(
+            "TAXONOMY MISS — query has no matching concepts.\n"
+            "Query: %s\n"
+            "Action: add missing domain terms to DOMAIN_TAXONOMY "
+            "in services/token_extractor.py",
+            query,
+        )
+
+    logger.info(
+        "Extraction summary — primary_anchor='%s' primary_concept='%s' "
+        "domain_concepts=%s taxonomy_miss=%s",
+        getattr(tokens, "primary_anchor", ""),
+        getattr(tokens, "primary_concept", ""),
+        tokens.domain_concepts,
+        getattr(tokens, "taxonomy_miss", False),
+    )
 
     # ------------------------------------------------------------------
     # Stage 1b — Constraint validation (drop any query that lost the

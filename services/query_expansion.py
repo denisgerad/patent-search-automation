@@ -211,7 +211,11 @@ def expand_query_with_metadata(
         "critical_tokens":    tokens.critical_tokens,
         "domain_concepts":    tokens.domain_concepts,
         "patent_synonyms":    tokens.patent_synonyms,
+        "primary_anchor":     tokens.primary_anchor,
+        "primary_concept":    tokens.primary_concept,
+        "taxonomy_miss":      tokens.taxonomy_miss,
         "claude_raw_response": raw,
+        "tokens":             tokens,    # full object for EPO fetch
     }
     return expanded, metadata
 

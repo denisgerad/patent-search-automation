@@ -265,17 +265,30 @@ def _run_search(queries: list[str]) -> tuple[list, list]:
         from services.epo_search_service import epo_fetch_by_keywords
         meta = st.session_state.get("expansion_metadata", {})
 
-        # epo_search_order: most discriminating term first (set by Claude pre-call)
-        keyword_terms = meta.get("epo_search_order", [])[:4]
-
-        # Fallbacks
-        if not keyword_terms:
-            keyword_terms = meta.get("critical_tokens", [])[:4]
-        if not keyword_terms and queries:
-            keyword_terms = [w for w in queries[0].lower().split() if len(w) > 5][:4]
-
-        logger.info("EPO CQL order (streamlit): %s", keyword_terms)
-        raw = epo_fetch_by_keywords(keyword_terms)
+        # Use the full tokens object stored by expand_query_with_metadata
+        tokens = meta.get("tokens")
+        if tokens is not None:
+            logger.info(
+                "EPO search — primary_anchor='%s' concept='%s'",
+                tokens.primary_anchor, tokens.primary_concept,
+            )
+            raw = epo_fetch_by_keywords(tokens)
+        else:
+            # Fallback: build a minimal ExtractedTokens from the metadata dict
+            from services.token_extractor import ExtractedTokens
+            keyword_terms = meta.get("epo_search_order", [])[:4]
+            if not keyword_terms:
+                keyword_terms = meta.get("critical_tokens", [])[:4]
+            if not keyword_terms and queries:
+                keyword_terms = [w for w in queries[0].lower().split() if len(w) > 5][:4]
+            logger.info("EPO CQL order (streamlit fallback): %s", keyword_terms)
+            stub = ExtractedTokens(
+                primary_anchor  = keyword_terms[0] if keyword_terms else "",
+                primary_concept = "unknown",
+                critical_tokens = keyword_terms,
+                epo_search_order= keyword_terms,
+            )
+            raw = epo_fetch_by_keywords(stub)
     elif backend == "lens" and settings.lens_api_token:
         from services.lens_search_service import fetch_all_patents
         raw = fetch_all_patents(queries)

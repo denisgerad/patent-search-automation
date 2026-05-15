@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from models.epo_client import EPOClient
 from models.schemas import PatentRecord
+from services.token_extractor import ExtractedTokens
 from utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -60,53 +61,88 @@ def _build_cql(keyword_terms: list[str]) -> str:
     return " AND ".join(parts)
 
 
-def epo_fetch_by_keywords(keyword_terms: list[str]) -> list[PatentRecord]:
+def _build_cql_tiered(tokens: ExtractedTokens) -> list[str]:
     """
-    Search EPO with a tiered AND strategy using pre-ordered keyword_terms.
+    Build CQL queries from most → least specific.
+    Returns a list of CQL strings to try in order until MIN_RESULTS are found.
 
-    keyword_terms should be tokens.epo_search_order (most discriminating first).
-    Falls back through progressively relaxed tiers if no results found.
+    Tier 1 (narrow):  primary_anchor AND domain_concept
+    Tier 2 (medium):  primary_anchor only
+    Tier 3 (broad):   primary_anchor synonyms OR domain synonyms
     """
-    if not keyword_terms:
-        log.warning("epo_fetch_by_keywords called with empty terms")
+    anchor   = tokens.primary_anchor
+    anchor_q = f'"{anchor}"' if " " in anchor else anchor
+
+    # Collect domain-level terms (autonomous vehicle etc.)
+    domain_terms: list[str] = []
+    for concept, data in tokens.concept_groups.items():
+        if data.get("type") == "domain":
+            domain_terms.extend(data["matched"])
+            domain_terms.extend(data["patent_synonyms"][:2])
+
+    cql_tiers: list[str] = []
+
+    # Tier 1: anchor AND domain
+    if domain_terms:
+        domain_parts = " OR ".join(
+            f'"{t}"' if " " in t else t for t in domain_terms[:3]
+        )
+        cql_tiers.append(
+            f"(ti={anchor_q} OR ab={anchor_q}) "
+            f"AND (ti=({domain_parts}) OR ab=({domain_parts}))"
+        )
+
+    # Tier 2: anchor only
+    cql_tiers.append(f"ti={anchor_q} OR ab={anchor_q}")
+
+    # Tier 3: anchor synonyms
+    anchor_concept = tokens.concept_groups.get(tokens.primary_concept, {})
+    synonyms = anchor_concept.get("patent_synonyms", [])[:3]
+    if synonyms:
+        syn_parts = " OR ".join(
+            f'"{s}"' if " " in s else s for s in synonyms
+        )
+        cql_tiers.append(f"ti=({syn_parts}) OR ab=({syn_parts})")
+
+    return cql_tiers
+
+
+def epo_fetch_by_keywords(tokens: ExtractedTokens) -> list[PatentRecord]:
+    """
+    Tiered CQL search — tries narrow first, broadens until MIN_RESULTS met.
+    Receives full ExtractedTokens; uses primary_anchor and concept_groups
+    to build discriminating CQL rather than a flat keyword list.
+    """
+    if not tokens.primary_anchor:
+        log.warning("epo_fetch_by_keywords: primary_anchor is empty — no search performed")
         return []
 
-    # --- Tier 1: full AND on all terms (highest precision) ----------------
-    cql = _build_cql(keyword_terms)
-    log.info("EPO Tier 1 CQL: %s", cql)
-    patent_ids = _epo_client.search(cql, max_results=50)
+    MIN_RESULTS = 10
+    cql_tiers   = _build_cql_tiered(tokens)
+    all_ids: list[str] = []
 
-    # --- Tier 2: drop least discriminating term (last in list) ------------
-    if not patent_ids and len(keyword_terms) > 2:
-        tier2_terms = keyword_terms[:-1]
-        cql2 = _build_cql(tier2_terms)
-        log.info("EPO Tier 2 CQL (dropped '%s'): %s", keyword_terms[-1], cql2)
-        patent_ids = _epo_client.search(cql2, max_results=50)
+    for i, cql in enumerate(cql_tiers):
+        log.info("EPO CQL tier %d: %s", i + 1, cql)
+        ids = _epo_client.search(cql, max_results=25)
+        log.info("Tier %d returned %d IDs", i + 1, len(ids))
+        all_ids.extend(ids)
+        # Deduplicate while preserving order
+        all_ids = list(dict.fromkeys(all_ids))
+        if len(all_ids) >= MIN_RESULTS:
+            log.info("MIN_RESULTS met at tier %d, stopping", i + 1)
+            break
 
-    # --- Tier 3: top 2 most discriminating terms only ---------------------
-    if not patent_ids and len(keyword_terms) > 1:
-        tier3_terms = keyword_terms[:2]
-        cql3 = _build_cql(tier3_terms)
-        log.info("EPO Tier 3 CQL (top-2 only): %s", cql3)
-        patent_ids = _epo_client.search(cql3, max_results=50)
-
-    # --- Tier 4: OR relaxation (last resort) ------------------------------
-    if not patent_ids:
-        parts = []
-        for term in keyword_terms:
-            quoted = f'"{term}"' if " " in term else term
-            parts.append(f"(ti={quoted} OR ab={quoted})")
-        cql_or = " OR ".join(parts)
-        log.warning("EPO Tier 4 CQL (OR relaxation): %s", cql_or)
-        patent_ids = _epo_client.search(cql_or, max_results=50)
-
-    if not patent_ids:
-        log.error("EPO returned 0 patents across all tiers for terms: %s", keyword_terms)
+    if not all_ids:
+        log.error(
+            "EPO returned 0 patents across all CQL tiers. "
+            "Primary anchor: '%s' — consider adding synonyms to taxonomy.",
+            tokens.primary_anchor,
+        )
         return []
 
-    # Fetch biblio for each patent ID
+    # Fetch biblio for each ID
     records: list[PatentRecord] = []
-    for pid in patent_ids:
+    for pid in all_ids:
         biblio = _epo_client.fetch_biblio(pid)
         if not biblio:
             continue
@@ -126,11 +162,22 @@ def epo_fetch_by_keywords(keyword_terms: list[str]) -> list[PatentRecord]:
 
     log.info(
         "EPO fetch complete: %d usable records from %d IDs",
-        len(records), len(patent_ids),
+        len(records), len(all_ids),
     )
     return records
 
 
 def fetch_all_patents(query_terms: list[str]) -> list[PatentRecord]:
-    """Compatibility wrapper."""
-    return epo_fetch_by_keywords(query_terms)
+    """Compatibility wrapper — builds a minimal ExtractedTokens from a keyword list."""
+    from services.token_extractor import ExtractedTokens as _ET
+    if not query_terms:
+        return []
+    # Use the longest term as the primary anchor (best proxy for specificity)
+    sorted_terms = sorted(query_terms, key=len, reverse=True)
+    stub = _ET(
+        primary_anchor  = sorted_terms[0],
+        primary_concept = "unknown",
+        critical_tokens = sorted_terms,
+        epo_search_order= sorted_terms,
+    )
+    return epo_fetch_by_keywords(stub)

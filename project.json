@@ -1,8 +1,27 @@
 {
   "name": "patentsearch",
   "created": "2026-05-14T09:25:55.201158+00:00",
-  "active_version": null,
-  "versions": [],
+  "active_version": "v2",
+  "versions": [
+    {
+      "name": "v1",
+      "timestamp": "2026-05-15T08:22:54.654795+00:00",
+      "source": "patent_rag_refactored (1).zip",
+      "sha256": "064b8d0dcd63dc93",
+      "size_kb": 79.3,
+      "file_count": 43,
+      "notes": ""
+    },
+    {
+      "name": "v2",
+      "timestamp": "2026-05-15T08:23:06.284101+00:00",
+      "source": "patent_rag_refactored (1).zip",
+      "sha256": "064b8d0dcd63dc93",
+      "size_kb": 79.3,
+      "file_count": 42,
+      "notes": ""
+    }
+  ],
   "description": "",
   "root": "/home/dennis/venv/projects/sarosh/patent-search"
 }

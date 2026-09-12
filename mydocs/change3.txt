@@ -1,0 +1,13 @@
+The three issues in your output
+Issue 1 — Duplicate terms: infrared and infrared sensors both appearing
+When Claude's pre-call returns infrared sensors as a supporting token and the taxonomy has already extracted infrared, both survive the merge because the old code only deduped exact matches. infrared sensors and infrared are not exact matches so both stayed. The fix is substring deduplication: if term A appears inside term B, drop A and keep B. infrared is a substring of infrared sensors, so infrared is dropped and the more specific phrase survives.
+Issue 2 — Generic standalone words: system, sensors in EPO search order
+Claude's epo_search_order was being used verbatim. Claude sometimes returns raw query words like system, sensors, vehicle individually. These are useless as standalone EPO AND terms — sensors matches millions of patents. The fix is a _GENERIC_STANDALONE set: single-word terms in this set are stripped from both supporting_tokens and epo_search_order. Multi-word phrases containing these words (like infrared sensors, autonomous vehicle) are kept because as phrases they are discriminating.
+Issue 3 — EPO search order was not capped
+Six terms in an EPO AND chain (lane detection AND autonomous vehicle AND infrared AND sensors AND system AND infrared sensors) is too restrictive — real-world queries often return zero results at that depth and fall through to the OR relaxation, defeating the purpose of the ordering. The cleaned list is now hard-capped at 4 terms.
+Result after fix:
+
+Supporting tokens: autonomous vehicle, infrared sensors
+EPO search order: lane detection → autonomous vehicle → infrared sensors (3 clean, specific phrases — no generic words, no duplicates)
+The _clean_term_list() function handles all three rules in one pass and is reused for both supporting_tokens and epo_search_order
+Query expansionPY Open in Python

@@ -1,0 +1,26 @@
+What changed, file by file
+services/token_extractor.py
+The old _fallback_noun_extraction extracted words by length alone, which is why optical (7 chars, common) ranked the same as rigidization (12 chars, novel). The new _rarity_scored_extraction applies a scoring system:
+
+Words in _SUPPRESSED (a ~50-word list of common patent descriptors, domain nouns, and gerunds) are skipped entirely — optical, maintaining, property, screen all fall here
+Remaining words score length + 8 + 5 (if rare suffix like -ization) + 3 (if hyphenated)
+rigidization scores 25, nothing else in that query comes close
+
+Test result confirmed: primary_token = 'rigidization', the other words are correctly discarded.
+ExtractedTokens now has primary_token and supporting_tokens as distinct fields. The old critical_tokens field is kept for backward compatibility with ranking and dedup — it's just the union of the two.
+prompts/identify_primary_token.txt (new file)
+A short Claude pre-call prompt. Called only when the taxonomy doesn't yield a primary token (novel domains, multi-concept queries). Explicitly instructs Claude that common adjectives, domain nouns, and gerunds are never the answer. Returns {"primary_token": "...", "supporting_tokens": [...], "reasoning": "..."}.
+services/query_expansion.py
+Adds a three-step pipeline:
+
+Step A — deterministic extraction (unchanged in principle, improved in accuracy)
+Step B — Claude pre-call if primary_token is still empty after Step A
+Step C — expansion prompt now uses PRIMARY ANCHOR (hard, must appear in every query) vs SUPPORTING TOKENS (soft, at least two must appear)
+
+For your AV example, Step B will be triggered (three taxonomy concepts match so no single primary is set deterministically), and Claude will return infrared or lane detection depending on the query. For rigidization, Step A already sets it correctly and Step B is skipped.
+prompts/query_expansion.txt
+Replaced the flat MANDATORY TOKENS with a tiered structure. The old prompt gave equal weight to all tokens, which is why Claude drifted toward optical. Now the prompt says the primary anchor must appear verbatim or via its direct synonym in every single expansion, with supporting tokens as a softer constraint.
+services/constraint_validator.py
+Validation is now tiered to match the prompt: a query missing the primary_token (or a direct synonym of it) is dropped hard. A query with the primary token but no supporting tokens is kept but logged as "weak". The old flat check against all anchors equally is replaced.
+orchestrator/patent_pipeline.py and streamlit_app.py
+Both now pass primary_token first to epo_fetch_by_keywords, so EPO's CQL AND chain starts with the most inventive concept, not an arbitrary token. The Streamlit Tab 1 now shows a blue info panel with the identified primary anchor and supporting tokens, so you can immediately see whether the extraction is correct before the search runs.Token extractorPY Open in PythonQuery expansionPY Open in PythonConstraint validatorPY Open in PythonIdentify primary tokenTXT Open in NotepadQuery expansion promptTXT Open in NotepadPatent pipelinePY Open in PythonStreamlit appPY Open in PythonDownload all

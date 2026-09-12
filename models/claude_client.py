@@ -13,11 +13,17 @@ from app.config import settings
 class ClaudeClient:
     """Calls Anthropic Claude via the official SDK."""
 
-    def __init__(self, model: str = "claude-sonnet-4-20250514", max_tokens: int = 4096):
+    _FALLBACK_MODELS = (
+        "claude-sonnet-4-6",
+        "claude-sonnet-5",
+        "claude-opus-4-8",
+    )
+
+    def __init__(self, model: str | None = None, max_tokens: int = 4096):
         # Pass the key explicitly from settings so it works regardless of whether
         # ANTHROPIC_API_KEY is set as an OS environment variable.
         self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        self.model = model
+        self.model = (model or settings.anthropic_model or self._FALLBACK_MODELS[0]).strip()
         self.max_tokens = max_tokens
 
     def complete(self, system: str, user: str, max_tokens: int | None = None) -> str:
@@ -32,10 +38,28 @@ class ClaudeClient:
         Returns:
             The model's reply as a plain string.
         """
-        msg = self.client.messages.create(
-            model=self.model,
-            max_tokens=max_tokens or self.max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-        )
-        return msg.content[0].text
+        candidates = []
+        seen = set()
+        for name in [self.model, *self._FALLBACK_MODELS]:
+            if name and name not in seen:
+                candidates.append(name)
+                seen.add(name)
+
+        last_error = None
+        for model_name in candidates:
+            try:
+                msg = self.client.messages.create(
+                    model=model_name,
+                    max_tokens=max_tokens or self.max_tokens,
+                    system=system,
+                    messages=[{"role": "user", "content": user}],
+                )
+                self.model = model_name
+                return msg.content[0].text
+            except anthropic.NotFoundError as exc:
+                last_error = exc
+                continue
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("No Anthropic model candidates were available.")

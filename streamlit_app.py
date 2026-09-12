@@ -76,25 +76,28 @@ with st.sidebar:
 
     st.divider()
     st.subheader("🔍 Search Backend")
-    _backend_name = settings.search_backend.lower()
+    _backend_name = (settings.patent_search_backend or settings.search_backend or "auto").lower()
     if _backend_name == "epo" and settings.epo_consumer_key:
         st.success("EPO Open Patent Services ✅")
     elif _backend_name == "epo" and not settings.epo_consumer_key:
         st.warning("EPO — credentials missing\nAdd `epo_consumer_key` and `epo_consumer_secret` to .env")
-    elif _backend_name == "lens" and settings.lens_api_token:
-        st.success("Lens.org Patent API ✅")
-    elif _backend_name == "lens" and not settings.lens_api_token:
-        st.warning("Lens.org — token missing\nAdd `lens_api_token=` to .env")
     elif _backend_name == "patentsview" and settings.patentsview_api_key:
         st.success("USPTO PatentsView API ✅")
     elif _backend_name == "patentsview" and not settings.patentsview_api_key:
         st.warning("PatentsView — API key missing\nAdd `patentsview_api_key=` to .env")
+    elif _backend_name == "auto":
+        if settings.epo_consumer_key:
+            st.info("Auto backend: EPO selected (key present)")
+        elif settings.patentsview_api_key:
+            st.info("Auto backend: PatentsView selected (key present)")
+        else:
+            st.info("Offline fixture data\n_(set `patent_search_backend=epo/patentsview` in .env for live search)_")
     else:
-        st.info("Offline fixture data\n_(set `search_backend=epo/lens/patentsview` in .env for live search)_")
+        st.info("Offline fixture data\n_(set `patent_search_backend=epo/patentsview` in .env for live search)_")
 
     st.divider()
     st.subheader("🤖 Active Models")
-    st.caption(f"**Query Expansion:** claude-sonnet-4 (API)")
+    st.caption(f"**Query Expansion:** {settings.anthropic_model} (API)")
     st.caption(f"**Embeddings:** {settings.embedding_model}")
 
     st.divider()

@@ -1,0 +1,323 @@
+Pattern 1: Anchor selection is wrong — too generic
+"Automated vehicle lane boundary detection IR sensor" → primary anchor = "ir sensor" (2 chars after stripping). This is wrong. "lane boundary detection" is the inventive concept, not "ir sensor". The anchor picker is selecting the first taxonomy match rather than the most discriminating term.
+Pattern 2: Taxonomy gaps causing concept drift
+"Autonomous car lane marking recognition thermal imaging" → domain concepts = [] (empty). Neither "autonomous car" nor "thermal imaging" matched your taxonomy. So the search ran with no anchors, returned CN.121069897.A (heat treatment of fasteners), and coverage scoring had nothing to penalize against.
+Pattern 3: CQL too narrow on multi-concept AND queries
+"Driverless car lane tracking" → returns "Manufacturer-based autonomous driving assessment" and "Object tracking methodologies" — topically adjacent but not about lane tracking specifically. The AND chain is finding patents that mention autonomous vehicles but not lane tracking itself.
+
+Fix 1: Anchor Picker — rank by discriminating power, not taxonomy order
+python# services/token_extractor.py
+
+# Discriminating power score per concept type.
+# Lower score = more specific = better primary anchor.
+# A patent about "lane detection" is far rarer than one about "infrared" —
+# so "lane detection" is more discriminating and should anchor the search.
+CONCEPT_DISCRIMINATING_POWER = {
+    "task":             1,   # most specific — "lane detection", "collision avoidance"
+    "detection":        1,
+    "application":      2,   # "lane marking", "pedestrian crossing"
+    "domain":           3,   # "autonomous vehicle", "self-driving"
+    "sensor":           4,   # "infrared", "lidar" — broad, many patents
+    "imaging":          4,
+    "generic_method":   5,   # "recognition", "detection" alone — too broad
+}
+
+# Expanded taxonomy with explicit concept types
+DOMAIN_TAXONOMY = {
+    # ── Task concepts (most discriminating) ──────────────────────────
+    "lane_detection": {
+        "type": "task",
+        "terms": [
+            "lane detection", "lane recognition", "lane tracking",
+            "lane boundary detection", "lane marking recognition",
+            "road marking detection", "lane keeping",
+        ],
+        "patent_synonyms": [
+            "lane boundary recognition", "road lane identification",
+            "traffic lane detection", "lane departure detection",
+        ],
+    },
+    "fatigue_detection": {
+        "type": "task",
+        "terms": [
+            "fatigue detection", "drowsiness detection", "driver fatigue",
+            "driver alertness", "driver monitoring",
+        ],
+        "patent_synonyms": [
+            "driver state monitoring", "operator alertness system",
+            "drowsiness monitoring system",
+        ],
+    },
+    "pedestrian_detection": {
+        "type": "task",
+        "terms": [
+            "pedestrian detection", "pedestrian crossing detection",
+            "crosswalk detection", "pedestrian recognition",
+        ],
+        "patent_synonyms": [
+            "pedestrian identification system", "crosswalk recognition",
+        ],
+    },
+    "collision_avoidance": {
+        "type": "task",
+        "terms": [
+            "collision avoidance", "collision detection", "obstacle avoidance",
+            "forward collision warning",
+        ],
+        "patent_synonyms": [
+            "collision prevention system", "obstacle detection system",
+        ],
+    },
+
+    # ── Domain concepts ───────────────────────────────────────────────
+    "autonomous_vehicle": {
+        "type": "domain",
+        "terms": [
+            "autonomous vehicle", "self-driving", "driverless",
+            "autonomous car", "autonomous driving", "adas",
+            "advanced driver assistance",
+        ],
+        "patent_synonyms": [
+            "autonomous driving system", "vehicle control system",
+            "ego vehicle", "automated vehicle",
+        ],
+    },
+
+    # ── Sensor concepts (least discriminating — appear everywhere) ────
+    "infrared_sensor": {
+        "type": "sensor",
+        "terms": [
+            "infrared", "infrared sensor", "ir sensor", "thermal sensor",
+            "thermal camera", "thermal imaging", "infrared camera",
+            "thermal detector",
+        ],
+        "patent_synonyms": [
+            "infrared detector", "thermal sensing device",
+            "IR imaging system", "thermal imager",
+        ],
+    },
+    "camera_sensor": {
+        "type": "sensor",
+        "terms": [
+            "camera", "camera-based", "camera sensor", "vision sensor",
+            "optical sensor", "imaging sensor",
+        ],
+        "patent_synonyms": [
+            "optical detector", "visual sensor", "imaging device",
+        ],
+    },
+    "lidar_sensor": {
+        "type": "sensor",
+        "terms": ["lidar", "lidar sensor", "laser scanner", "laser sensor"],
+        "patent_synonyms": ["laser detection system", "lidar array"],
+    },
+    "radar_sensor": {
+        "type": "sensor",
+        "terms": ["radar", "radar sensor", "radar-based"],
+        "patent_synonyms": ["radio detection system", "radar array"],
+    },
+}
+
+
+def extract_critical_tokens(query: str) -> ExtractedTokens:
+    query_lower = query.lower()
+    matched = []   # list of (concept_name, concept_data, matched_terms)
+
+    for concept, data in DOMAIN_TAXONOMY.items():
+        matched_terms = [t for t in data["terms"] if t in query_lower]
+        if matched_terms:
+            matched.append((concept, data, matched_terms))
+
+    if not matched:
+        return _fallback_extraction(query)
+
+    # Sort matched concepts by discriminating power (lower = more specific)
+    matched.sort(
+        key=lambda x: CONCEPT_DISCRIMINATING_POWER.get(x[1]["type"], 99)
+    )
+
+    # Primary anchor = most discriminating matched concept
+    primary_concept, primary_data, primary_terms = matched[0]
+
+    # Build flat lists for downstream use
+    critical_tokens = []
+    patent_synonyms = []
+    domain_concepts = []
+    concept_groups  = {}
+
+    for concept, data, terms in matched:
+        critical_tokens.extend(terms)
+        patent_synonyms.extend(data["patent_synonyms"])
+        domain_concepts.append(concept)
+        concept_groups[concept] = {
+            "type":            data["type"],
+            "terms":           data["terms"],
+            "patent_synonyms": data["patent_synonyms"],
+            "matched":         terms,
+        }
+
+    return ExtractedTokens(
+        critical_tokens = list(set(critical_tokens)),
+        domain_concepts = domain_concepts,         # ordered by discriminating power
+        patent_synonyms = list(set(patent_synonyms)),
+        original_query  = query,
+        concept_groups  = concept_groups,
+        primary_anchor  = primary_terms[0],        # single best anchor term
+        primary_concept = primary_concept,
+    )
+
+
+def _fallback_extraction(query: str) -> ExtractedTokens:
+    """
+    No taxonomy match — extract noun phrases heuristically.
+    Flags the result so the pipeline can warn the user to extend the taxonomy.
+    """
+    import re
+    hyphenated = re.findall(r'\b\w+-\w+\b', query.lower())
+    long_words  = [w for w in query.lower().split() if len(w) > 6]
+    tokens      = list(set(hyphenated + long_words))
+
+    log.warning(
+        "No taxonomy match for query — fallback extraction used. "
+        "Add missing concepts to DOMAIN_TAXONOMY in token_extractor.py",
+        extra={"query": query, "fallback_tokens": tokens}
+    )
+
+    return ExtractedTokens(
+        critical_tokens = tokens,
+        domain_concepts = [],
+        patent_synonyms = [],
+        original_query  = query,
+        concept_groups  = {},
+        primary_anchor  = tokens[0] if tokens else "",
+        primary_concept = "unknown",
+        taxonomy_miss   = True,    # flag for UI warning
+    )
+
+Fix 2: EPO CQL uses primary anchor first, not flat token list
+python# services/epo_search_service.py
+
+def _build_cql_tiered(tokens: ExtractedTokens) -> list[str]:
+    """
+    Build CQL queries from most → least specific.
+    Returns a list of CQL strings to try in order until results are found.
+
+    Tier 1 (narrow):  primary_anchor AND domain_concept
+    Tier 2 (medium):  primary_anchor only
+    Tier 3 (broad):   primary_anchor synonyms OR domain synonyms
+    """
+    anchor   = tokens.primary_anchor
+    anchor_q = f'"{anchor}"' if " " in anchor else anchor
+
+    # Collect domain-level terms (autonomous vehicle etc.)
+    domain_terms = []
+    for concept, data in tokens.concept_groups.items():
+        if data["type"] == "domain":
+            domain_terms.extend(data["matched"])
+            domain_terms.extend(data["patent_synonyms"][:2])
+
+    cql_tiers = []
+
+    # Tier 1: anchor AND domain
+    if domain_terms:
+        domain_parts = " OR ".join(
+            f'"{t}"' if " " in t else t for t in domain_terms[:3]
+        )
+        cql_tiers.append(
+            f"(ti={anchor_q} OR ab={anchor_q}) "
+            f"AND (ti=({domain_parts}) OR ab=({domain_parts}))"
+        )
+
+    # Tier 2: anchor only
+    cql_tiers.append(f"ti={anchor_q} OR ab={anchor_q}")
+
+    # Tier 3: anchor synonyms
+    anchor_concept = tokens.concept_groups.get(tokens.primary_concept, {})
+    synonyms = anchor_concept.get("patent_synonyms", [])[:3]
+    if synonyms:
+        syn_parts = " OR ".join(
+            f'"{s}"' if " " in s else s for s in synonyms
+        )
+        cql_tiers.append(f"ti=({syn_parts}) OR ab=({syn_parts})")
+
+    return cql_tiers
+
+
+def epo_fetch_by_keywords(tokens: ExtractedTokens) -> list[PatentRecord]:
+    """
+    Tiered CQL search — tries narrow first, broadens until MIN_RESULTS met.
+    Now receives full ExtractedTokens instead of flat keyword list.
+    """
+    MIN_RESULTS = 10
+    cql_tiers   = _build_cql_tiered(tokens)
+    all_ids     = []
+
+    for i, cql in enumerate(cql_tiers):
+        log.info(f"EPO CQL tier {i+1}: {cql}")
+        ids = _epo_client.search(cql, max_results=25)
+        log.info(f"Tier {i+1} returned {len(ids)} IDs")
+        all_ids.extend(ids)
+        # Deduplicate
+        all_ids = list(dict.fromkeys(all_ids))
+        if len(all_ids) >= MIN_RESULTS:
+            log.info(f"MIN_RESULTS met at tier {i+1}, stopping")
+            break
+
+    if not all_ids:
+        log.error(
+            "EPO returned 0 patents across all CQL tiers. "
+            "Primary anchor: '%s' — consider adding synonyms to taxonomy.",
+            tokens.primary_anchor
+        )
+        return []
+
+    # Fetch biblio for each ID (unchanged)
+    records = []
+    for pid in all_ids:
+        biblio = _epo_client.fetch_biblio(pid)
+        if not biblio or biblio["abstract"] == "NO ABSTRACT FOUND":
+            continue
+        try:
+            records.append(PatentRecord(
+                patent_id       = biblio["patent_id"],
+                patent_title    = biblio["title"],
+                patent_abstract = biblio["abstract"],
+                patent_type     = "",
+                patent_date     = None,
+            ))
+        except Exception as e:
+            log.warning(f"PatentRecord build failed for {pid}: {e}")
+
+    log.info(f"EPO fetch: {len(records)} usable records from {len(all_ids)} IDs")
+    return records
+
+Fix 3: Warn on taxonomy miss in the UI
+python# orchestrator/patent_pipeline.py
+
+def run_pipeline(query: str) -> PipelineResult:
+    expanded, tokens = expand_query(query, mistral)
+
+    # Warn immediately if taxonomy had no match
+    if getattr(tokens, "taxonomy_miss", False):
+        log.warning(
+            "TAXONOMY MISS — query has no matching concepts.\n"
+            f"Query: {query}\n"
+            "Action: add missing domain terms to DOMAIN_TAXONOMY "
+            "in services/token_extractor.py"
+        )
+
+    log.info(
+        "Extraction summary",
+        extra={
+            "primary_anchor":  tokens.primary_anchor,
+            "primary_concept": tokens.primary_concept,
+            "domain_concepts": tokens.domain_concepts,
+            "taxonomy_miss":   getattr(tokens, "taxonomy_miss", False),
+        }
+    )
+    ...
+
+What Changes for Each Failing Query
+For "Automated vehicle lane boundary detection IR sensor" — previously anchor = "ir sensor" (sensor type, power=4). Now anchor = "lane boundary detection" (task type, power=1). EPO searches for "lane boundary detection" AND "autonomous vehicle" first.
+For "Autonomous car lane marking recognition thermal imaging" — previously concepts = [], taxonomy miss, returns heat treatment patent. Now "autonomous car" matches autonomous_vehicle taxonomy, "lane marking recognition" matches lane_detection taxonomy. Primary anchor = "lane marking recognition". Search is grounded.
+For "Driverless car lane tracking infrared camera" — anchor = "lane tracking" (task, power=1). Tier 1 CQL = "lane tracking" AND (driverless OR "autonomous vehicle" OR "automated vehicle"). This is far more discriminating than the flat AND chain that was returning object tracking methodology patents.

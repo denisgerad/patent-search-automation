@@ -15,7 +15,7 @@ defined below the Settings class — set to None to disable.
 """
 
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -66,15 +66,33 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Search backend selection
     # ------------------------------------------------------------------
-    # "lens"    — Lens.org Patent API (requires lens_api_token)
-    # "fixture" — offline fixture data (for testing / demo without an API)
-    # "patentsview" — legacy (offline as of March 2026, kept for reference)
-    # "epo"     — EPO Open Patent Services (requires epo_consumer_key + epo_consumer_secret)
-    search_backend: str = "fixture"  # default to fixture until API token is set
+    # "auto"        — EPO if key present, else PatentsView, else error
+    # "patentsview" — always use PatentsView/USPTO backend
+    # "epo"         — always use EPO OPS backend
+    # Legacy alias kept for compatibility with older .env files.
+    patent_search_backend: Literal["epo", "uspto", "patentsview", "auto"] = "auto"
+    search_backend: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _sync_backend_alias(self) -> "Settings":
+        """Keep the legacy search_backend field aligned with the explicit backend switch."""
+        configured = (self.patent_search_backend or "").strip().lower()
+        legacy = (self.search_backend or "").strip().lower()
+
+        if configured not in {"epo", "uspto", "patentsview", "auto"}:
+            configured = "auto"
+            self.patent_search_backend = "auto"
+
+        if legacy in {"epo", "uspto", "patentsview", "auto"} and configured == "auto":
+            self.patent_search_backend = legacy
+
+        self.search_backend = self.patent_search_backend
+        return self
 
     # ------------------------------------------------------------------
     # Model selection
     # ------------------------------------------------------------------
+    anthropic_model: str = "claude-sonnet-4-6"
     mistral_model: str = "mistral"             # Ollama model tag; e.g. "mistral:7b-instruct"
     embedding_model: str = "BAAI/bge-large-en-v1.5"  # sentence-transformers model ID
 
@@ -158,6 +176,31 @@ class Settings(BaseSettings):
     def _strip_key_whitespace(cls, v: object) -> str:
         """Strip invisible whitespace that silently breaks API key truth-checks."""
         return (v or "").strip() if isinstance(v, str) else (v or "")
+
+    @field_validator("patent_search_backend", "search_backend", mode="before")
+    @classmethod
+    def _strip_backend_name(cls, v: object) -> str:
+        """Normalize backend names from .env to lowercase and trim whitespace."""
+        if v is None:
+            return ""
+        return str(v).strip().lower()
+
+    @field_validator("anthropic_model")
+    @classmethod
+    def _normalize_anthropic_model(cls, v: str) -> str:
+        """Map legacy Anthropic IDs to currently available models."""
+        if not v:
+            return "claude-sonnet-4-6"
+        normalized = str(v).strip()
+        aliases = {
+            "claude-sonnet-4-20250514": "claude-sonnet-4-6",
+            "claude-3-5-sonnet-20241022": "claude-sonnet-4-6",
+            "claude-3-7-sonnet-20250219": "claude-sonnet-4-6",
+            "claude-3-5-sonnet-latest": "claude-sonnet-4-6",
+            "claude-3-5-haiku-latest": "claude-sonnet-4-6",
+            "claude-opus-4-20250514": "claude-opus-4-8",
+        }
+        return aliases.get(normalized, normalized)
 
     @field_validator("patentsview_api_url")
     @classmethod

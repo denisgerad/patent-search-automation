@@ -51,32 +51,59 @@ _MIN_RESULTS_THRESHOLD: int = 10
 
 class SearchBackend(Enum):
     PATENTSVIEW = "patentsview"
+    USPTO = "uspto"
     EPO = "epo"
 
 
 def _resolve_backend() -> SearchBackend:
     """
-    Single source of truth for backend selection.
-    Evaluated ONCE at pipeline start.
+    Resolve backend from config.
 
-    Bug 1 fix: .strip() before truth-check so trailing whitespace in .env
-               never causes silent fallthrough.
-    Raises immediately if no key is configured — never proceeds undefined.
+    - "patentsview" -> always use PatentsView (USPTO)
+    - "uspto"      -> alias for PatentsView / USPTO ODP
+    - "epo"        -> always use EPO OPS
+    - "auto"       -> EPO if key present, else PatentsView
+                      (backward-compatible default behavior)
+
+    Raises RuntimeError if the selected backend has no API key.
     """
-    epo_key = (settings.epo_consumer_key or "").strip()
-    pv_key  = (settings.patentsview_api_key or "").strip()
+    selection = (
+        getattr(settings, "patent_search_backend", "")
+        or getattr(settings, "search_backend", "")
+        or "auto"
+    ).strip().lower()
 
-    if epo_key:
-        logger.info("Backend resolved: EPO (epo_consumer_key present)")
+    if selection in {"uspto", "patentsview"}:
+        if not (settings.patentsview_api_key or "").strip():
+            raise RuntimeError(
+                "patent_search_backend=uspto/patentsview but patentsview_api_key is missing in .env"
+            )
+        logger.info("Backend: USPTO/PatentsView — explicit config")
+        return SearchBackend.USPTO if selection == "uspto" else SearchBackend.PATENTSVIEW
+
+    if selection == "epo":
+        if not (settings.epo_consumer_key or "").strip():
+            raise RuntimeError(
+                "patent_search_backend=epo but epo_consumer_key is missing in .env"
+            )
+        logger.info("Backend: EPO OPS — explicit config")
         return SearchBackend.EPO
 
-    if pv_key:
-        logger.info("Backend resolved: PatentsView (patentsview_api_key present)")
-        return SearchBackend.PATENTSVIEW
+    if selection == "auto":
+        if (settings.epo_consumer_key or "").strip():
+            logger.info("Backend: EPO OPS — auto (epo_consumer_key present)")
+            return SearchBackend.EPO
+        if (settings.patentsview_api_key or "").strip():
+            logger.info("Backend: USPTO/PatentsView — auto (patentsview_api_key present)")
+            return SearchBackend.PATENTSVIEW
+        raise RuntimeError(
+            "patent_search_backend=auto but no API key found for either EPO or PatentsView. "
+            "Set at least one key in .env"
+        )
 
-    raise RuntimeError(
-        "No API key found for any search backend. "
-        "Set patentsview_api_key or epo_consumer_key in .env"
+    raise ValueError(
+        f"Unknown patent_search_backend value: '{selection}'. "
+        "Must be 'epo', 'uspto', 'patentsview', or 'auto'."
     )
 
 
@@ -91,8 +118,17 @@ def _search(
     """
     if backend == SearchBackend.EPO:
         return _search_epo(tokens, validated_queries)
+
+    if backend == SearchBackend.USPTO:
+        return fetch_patents_with_fallback(
+            tokens,
+            validated_queries,
+            min_results=15,
+        )
+
     if backend == SearchBackend.PATENTSVIEW:
         return _search_patentsview(tokens, validated_queries)
+
     raise ValueError(f"Unhandled backend: {backend}")
 
 

@@ -19,6 +19,7 @@ class PatentRecord(BaseModel):
     patent_abstract: Optional[str] = None
     patent_type: Optional[str] = None
     patent_date: Optional[str] = None
+    continuity_family_id: Optional[str] = None
 
 
 class RankedPatent(BaseModel):

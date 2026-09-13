@@ -86,21 +86,6 @@ def filter_irrelevant_patents(
             user=prompt,
             max_tokens=1000,
         )
-        raw = raw.strip()
-
-        if raw.startswith("```"):
-            lines = raw.splitlines()
-
-            # Remove opening Markdown fence
-            if lines and lines[0].strip().startswith("```"):
-                lines = lines[1:]
-
-            # Remove closing Markdown fence
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-
-            raw = "\n".join(lines).strip()
-
         decisions = json.loads(raw)
         relevant_ids = {
             d["patent_id"] for d in decisions if d.get("relevant")

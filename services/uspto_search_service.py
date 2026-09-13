@@ -188,6 +188,51 @@ def _get_abstract(raw: dict) -> str:
         return ""
 
 
+def _get_continuity_family_id(raw: dict) -> str | None:
+    """Determine the root application number for a USPTO continuity family."""
+
+    application_number = (
+        str(raw.get("applicationNumberText") or "").strip()
+    )
+
+    if not application_number:
+        return None
+
+    parent_bag = raw.get("parentContinuityBag") or []
+
+    if not isinstance(parent_bag, list) or not parent_bag:
+        return application_number
+
+    parent_candidates: list[tuple[str, str]] = []
+
+    for relationship in parent_bag:
+        if not isinstance(relationship, dict):
+            continue
+
+        parent_number = str(
+            relationship.get("parentApplicationNumberText") or ""
+        ).strip()
+
+        parent_filing_date = str(
+            relationship.get("parentApplicationFilingDate") or ""
+        ).strip()
+
+        if parent_number:
+            parent_candidates.append(
+                (parent_filing_date, parent_number)
+            )
+
+    if not parent_candidates:
+        return application_number
+
+    # The earliest parent in the continuity chain is the family root.
+    parent_candidates.sort(
+        key=lambda item: item[0] or "9999-99-99"
+    )
+
+    return parent_candidates[0][1]
+
+
 def _build_patent_record(raw: dict) -> PatentRecord | None:
     """Convert one USPTO ODP record into PatentRecord."""
 
@@ -197,6 +242,8 @@ def _build_patent_record(raw: dict) -> PatentRecord | None:
         raw.get("applicationNumberText")
         or ""
     )
+
+    continuity_family_id = _get_continuity_family_id(raw)
 
     title = (
         metadata.get("inventionTitle")
@@ -244,6 +291,7 @@ def _build_patent_record(raw: dict) -> PatentRecord | None:
             patent_abstract=abstract or None,
             patent_type=patent_type or None,
             patent_date=str(patent_date) if patent_date else None,
+            continuity_family_id=continuity_family_id,
         )
 
     except Exception as exc:
@@ -253,6 +301,17 @@ def _build_patent_record(raw: dict) -> PatentRecord | None:
             exc,
         )
         return None
+
+
+def _build_odp_query(query: str) -> str:
+    """Convert an application search phrase into an ODP title query."""
+
+    query = " ".join(query.split()).strip()
+
+    if not query:
+        return query
+
+    return f'applicationMetaData.inventionTitle:"{query}"'
 
 
 def search_patents(
@@ -266,16 +325,18 @@ def search_patents(
     """
 
     headers = _build_headers()
+    odp_query = _build_odp_query(query)
 
     params = {
-        "q": query,
+        "q": odp_query,
         "offset": offset,
         "limit": min(limit, 100),
     }
 
     log.info(
-        "USPTO ODP search: %s",
+        "USPTO ODP search: %s -> %s",
         query,
+        odp_query,
     )
 
     try:

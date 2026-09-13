@@ -460,90 +460,20 @@ def fetch_patents_with_fallback(
     if settings.patent_search_backend == "uspto":
         from services.uspto_search_service import search_patents
 
-        # Stage 1: validated phrase-level expanded queries
-        log.info(
-            "USPTO fallback stage 1: %d expanded queries",
-            len(validated_queries),
-        )
+        all_patents = []
 
-        for query in validated_queries:
-            batch = search_patents(
-                query=query,
-                limit=25,
-                offset=0,
-            )
-            _add(batch)
-
-            log.info(
-                "USPTO stage 1 query='%s': +%d (total %d)",
-                query,
-                len(batch),
-                len(results),
-            )
-
-            if len(results) >= min_results:
-                log.info(
-                    "USPTO fallback complete after stage 1: %d unique patents",
-                    len(results),
-                )
-                return results
-
-        # Stage 2: individual critical tokens
-        log.info(
-            "USPTO fallback stage 2: %d critical tokens",
-            len(tokens.critical_tokens),
-        )
-
-        for token in tokens.critical_tokens[:4]:
-            batch = search_patents(
+        # Use the original critical concepts for USPTO candidate retrieval.
+        # Mistral-generated natural-language expansions are better handled
+        # later by semantic ranking rather than exact title matching.
+        for token in tokens.critical_tokens:
+            results = search_patents(
                 query=token,
                 limit=25,
                 offset=0,
             )
-            _add(batch)
+            all_patents.extend(results)
 
-            log.info(
-                "USPTO stage 2 token='%s': +%d (total %d)",
-                token,
-                len(batch),
-                len(results),
-            )
-
-            if len(results) >= min_results:
-                log.info(
-                    "USPTO fallback complete after stage 2: %d unique patents",
-                    len(results),
-                )
-                return results
-
-        # Stage 3: domain concept fallback
-        log.info("USPTO fallback stage 3: domain concept fallback")
-
-        for concept in tokens.domain_concepts[:2]:
-            term = concept.replace("_", " ")
-
-            batch = search_patents(
-                query=term,
-                limit=25,
-                offset=0,
-            )
-            _add(batch)
-
-            log.info(
-                "USPTO stage 3 concept='%s': +%d (total %d)",
-                concept,
-                len(batch),
-                len(results),
-            )
-
-            if len(results) >= min_results:
-                return results
-
-        log.info(
-            "USPTO fallback complete: %d unique patents",
-            len(results),
-        )
-        return results
+        return all_patents
 
     # ------------------------------------------------------------------
     # Legacy PatentsView backend

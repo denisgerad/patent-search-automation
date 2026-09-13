@@ -295,6 +295,26 @@ def _run_search(queries: list[str]) -> tuple[list, list]:
     elif backend == "lens" and settings.lens_api_token:
         from services.lens_search_service import fetch_all_patents
         raw = fetch_all_patents(queries)
+    elif backend == "uspto":
+        from services.search_service import fetch_patents_with_fallback
+
+        meta = st.session_state.get("expansion_metadata", {})
+        tokens = meta.get("tokens")
+
+        if tokens is not None:
+            raw = fetch_patents_with_fallback(
+                tokens,
+                queries,
+                min_results=15,
+            )
+        else:
+            logger.warning(
+                "USPTO search: no extracted tokens available; "
+                "falling back to expanded-query search."
+            )
+            from services.search_service import fetch_all_patents
+            raw = fetch_all_patents(queries)
+
     elif backend == "patentsview":
         from services.search_service import fetch_all_patents
         raw = fetch_all_patents(queries)
@@ -318,11 +338,13 @@ def _run_rank(q: str, patents: list, k: int) -> list:
     query_vec = embed_query(q, em, expanded=expanded)
     # Pass critical_tokens + synonyms for anchor penalty
     meta = st.session_state.get("expansion_metadata", {})
+    tokens = meta.get("tokens")
     critical = list(dict.fromkeys(
         meta.get("critical_tokens", []) + meta.get("patent_synonyms", [])
     ))
     return rank(query=q, patents=patents, doc_vecs=doc_vecs,
-                query_vec=query_vec, top_k=k, critical_tokens=critical or None)
+                query_vec=query_vec, top_k=k, critical_tokens=critical or None,
+                tokens=tokens)
 
 
 def _run_search_json(schema) -> tuple[list, list]:

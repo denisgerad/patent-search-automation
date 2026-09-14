@@ -7,7 +7,7 @@ the query and return a JSON array where every element has exactly these fields:
   {
     "patent_id":             string,   // the supplied patent identifier
     "overlap_level":         string,   // one of: "high" | "medium" | "low"
-    "key_overlapping_claims": string,  // brief description of claims that overlap the query
+    "key_overlapping_features": string,  // brief description of technical features that overlap the query
     "differentiation_notes": string   // how this patent differs from the query technology
   }
 

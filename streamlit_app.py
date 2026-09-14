@@ -76,24 +76,39 @@ with st.sidebar:
 
     st.divider()
     st.subheader("🔍 Search Backend")
-    _backend_name = (settings.patent_search_backend or settings.search_backend or "auto").lower()
-    if _backend_name == "epo" and settings.epo_consumer_key:
-        st.success("EPO Open Patent Services ✅")
+    _backend_name = (
+        settings.patent_search_backend or settings.search_backend or "auto"
+    ).lower()
+
+    if _backend_name == "uspto" and settings.patentsview_api_key:
+        st.success("🇺🇸 USPTO Patent Search (ODP) ✅")
+        st.caption("Live USPTO patent data")
+
+    elif _backend_name == "uspto" and not settings.patentsview_api_key:
+        st.warning(
+            "USPTO ODP — API key missing\\n"
+            "Add `patentsview_api_key=` to .env"
+        )
+
+    elif _backend_name == "epo" and settings.epo_consumer_key:
+        st.success("🇪🇺 EPO Open Patent Services (OPS) ✅")
+        st.caption("Live EPO patent data")
+
     elif _backend_name == "epo" and not settings.epo_consumer_key:
-        st.warning("EPO — credentials missing\nAdd `epo_consumer_key` and `epo_consumer_secret` to .env")
+        st.warning(
+            "EPO OPS — credentials missing\\n"
+            "Add `epo_consumer_key` and `epo_consumer_secret` to .env"
+        )
+
     elif _backend_name == "patentsview" and settings.patentsview_api_key:
-        st.success("USPTO PatentsView API ✅")
-    elif _backend_name == "patentsview" and not settings.patentsview_api_key:
-        st.warning("PatentsView — API key missing\nAdd `patentsview_api_key=` to .env")
+        st.success("USPTO ODP compatibility backend ✅")
+        st.caption("Live USPTO patent data")
+
     elif _backend_name == "auto":
-        if settings.epo_consumer_key:
-            st.info("Auto backend: EPO selected (key present)")
-        elif settings.patentsview_api_key:
-            st.info("Auto backend: PatentsView selected (key present)")
-        else:
-            st.info("Offline fixture data\n_(set `patent_search_backend=epo/patentsview` in .env for live search)_")
+        st.info("Automatic backend selection")
+
     else:
-        st.info("Offline fixture data\n_(set `patent_search_backend=epo/patentsview` in .env for live search)_")
+        st.info("No live patent-search backend configured")
 
     st.divider()
     st.subheader("🤖 Active Models")
@@ -228,7 +243,7 @@ with st.expander("📋 JSON Format  *(optional — overrides Mistral expansion)*
 
 col1, col2, col3 = st.columns([2, 2, 1])
 run_to_top20 = col1.button("▶ Run to Top 20", type="primary", use_container_width=True)
-run_claude   = col2.button("🤖 Send Top 20 to Claude", use_container_width=True,
+run_claude   = col2.button("🤖 Send Ranked Results to Claude", use_container_width=True,
                             disabled=(st.session_state.stage < 3))
 col3.button("🔄 Reset", on_click=_reset, use_container_width=True)
 
@@ -499,8 +514,8 @@ if run_to_top20 and query.strip():
             st.session_state.error = "No patents returned. Try a broader query."
             logger.warning("No patents returned for expanded queries: %s", expanded)
         else:
-            # Stage 3 — embed + rank
-            with st.spinner(f"Stage 3/3 — Embedding & ranking {len(unique)} patents…"):
+            # Stage 3 — technical relevance ranking
+            with st.spinner(f"Stage 3 — Technical relevance ranking {len(unique)} patents…"):
                 ranked = _timed("3. Embed + rank", _run_rank, query, unique, top_k)
                 logger.debug("Ranking result count: %d", len(ranked))
             st.session_state.ranked = ranked
@@ -513,7 +528,7 @@ if run_to_top20 and query.strip():
 
 if run_claude and st.session_state.stage >= 3:
     try:
-        with st.spinner("Calling Claude for comparison & report…"):
+        with st.spinner("Calling Claude for technical comparison & report…"):
             comparison, report = _timed(
                 "4. Claude analysis", _run_claude,
                 query, st.session_state.ranked
@@ -534,8 +549,8 @@ if run_claude and st.session_state.stage >= 3:
 tab_expand, tab_search, tab_rank, tab_claude = st.tabs([
     "1 · Query Expansion",
     "2 · Search Results",
-    "3 · Top 20 Ranked",
-    "4 · Claude Analysis",
+    "3 · Technical Relevance",
+    "4 · Claude Technical Analysis",
 ])
 
 # ── Tab 1: Query Expansion ──────────────────────────────────────────────────
@@ -730,17 +745,16 @@ with tab_search:
     else:
         st.info("Run the pipeline to see raw search results here.")
 
-# ── Tab 3: Top 20 Ranked ─────────────────────────────────────────────────────
+# ── Tab 3: Technical Relevance ─────────────────────────────────────────────────────
 with tab_rank:
     if st.session_state.ranked:
         total_unique = len(st.session_state.unique_patents)
         shown        = len(st.session_state.ranked)
         filtered_out = total_unique - shown
-        from app.config import settings as _s
         st.success(
             f"Top {shown} of {total_unique} unique patent(s) — "
-            f"cosine ≥ {_s.cosine_threshold} threshold applied"
-            + (f" · {filtered_out} discarded" if filtered_out > 0 else "")
+            "hybrid relevance ranking applied"
+            + (f" · {filtered_out} not selected" if filtered_out > 0 else "")
         )
 
         rows = []
@@ -819,17 +833,17 @@ with tab_rank:
     else:
         st.info("Run the pipeline to see ranked patents here.")
 
-# ── Tab 4: Claude Analysis ───────────────────────────────────────────────────
+# ── Tab 4: Claude Technical Analysis ───────────────────────────────────────────────────
 with tab_claude:
     if st.session_state.stage < 3:
-        st.info("Complete stages 1–3 first, then click **Send Top 20 to Claude**.")
+        st.info("Complete stages 1–3 first, then click **Send Ranked Results to Claude**.")
     elif st.session_state.stage == 3:
         st.warning("Top 20 are ready. Click **Send Top 20 to Claude** to continue.")
     else:
-        sub1, sub2 = st.tabs(["Comparison JSON", "Report"])
+        sub1, sub2 = st.tabs(["Technical Comparison JSON", "Report"])
 
         with sub1:
-            st.subheader("Structured claim comparison")
+            st.subheader("Structured technical comparison")
             try:
                 parsed = json.loads(st.session_state.comparison)
                 comp_df = pd.DataFrame(parsed)

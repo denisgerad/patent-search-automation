@@ -60,7 +60,7 @@ def compare_patents(query: str, patents: list[Any], client: ClaudeClient) -> str
     Analyse the top patents against *query* and return a JSON string.
 
     The returned string is a JSON array as specified in prompts/comparison_system.txt,
-    with fields: patent_id, overlap_level, key_overlapping_claims, differentiation_notes.
+    with fields: patent_id, overlap_level, key_overlapping_features, differentiation_notes.
 
     Args:
         query:   The original (or expanded) search query.

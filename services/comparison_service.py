@@ -26,7 +26,7 @@ SYSTEM_PROMPT: str = load_prompt("comparison_system.txt")
 # Maximum patents to include in a single comparison call.
 # Claude's context window is large, but keep this bounded to control cost/latency.
 # Change this value here if you need deeper analysis.
-MAX_PATENTS_TO_COMPARE = 10
+MAX_PATENTS_TO_COMPARE = 20
 
 
 def _format_patents_for_prompt(patents: list[Any]) -> str:

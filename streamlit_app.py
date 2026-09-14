@@ -505,6 +505,7 @@ if run_to_top20 and query.strip():
                 logger.debug("Ranking result count: %d", len(ranked))
             st.session_state.ranked = ranked
             st.session_state.stage = 3
+            st.rerun()
 
     except Exception as exc:
         logger.exception("Unhandled exception during pipeline run")

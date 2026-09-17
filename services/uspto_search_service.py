@@ -238,6 +238,24 @@ def _build_patent_record(raw: dict) -> PatentRecord | None:
 
     metadata = raw.get("applicationMetaData") or {}
 
+    uspc_class = (
+        str(metadata.get("class") or "").strip()
+        or None
+    )
+
+    uspc_subclass = (
+        str(metadata.get("subclass") or "").strip()
+        or None
+    )
+
+    cpc_classifications = [
+        str(item).strip()
+        for item in (
+            metadata.get("cpcClassificationBag") or []
+        )
+        if str(item).strip()
+    ]
+
     application_number = (
         raw.get("applicationNumberText")
         or ""
@@ -292,6 +310,9 @@ def _build_patent_record(raw: dict) -> PatentRecord | None:
             patent_type=patent_type or None,
             patent_date=str(patent_date) if patent_date else None,
             continuity_family_id=continuity_family_id,
+            uspc_class=uspc_class,
+            uspc_subclass=uspc_subclass,
+            cpc_classifications=cpc_classifications,
         )
 
     except Exception as exc:

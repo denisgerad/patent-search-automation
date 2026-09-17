@@ -31,6 +31,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.config import settings
+from models.schemas import SearchStrategy, SearchConcept, ProximityRule
+from services.classification_service import aggregate_classifications
+from services.search_strategy_service import (
+    build_boolean_search,
+    build_uspto_search_strings,
+)
 
 # ── page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -59,6 +65,10 @@ _DEFAULTS = {
     "json_uspto_url": "",      # USPTO Full Text link
     "json_result_count": None, # PatentsView total_patent_count
     "json_groups": [],         # list[list[str]] — for badge matching
+
+    # Phase 1 — manual search strategy
+    "search_strategy": None,
+    "search_strategy_approved": False,
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -151,6 +161,373 @@ query = st.text_area(
     height=80,
     key="query_input",
 )
+
+# ── Phase 1 — Manual Search Strategy ──────────────────────────────────────────
+st.divider()
+st.subheader("🧭 Phase 1 — Manual Search Strategy")
+st.caption(
+    "Define the important concepts and alternative patent terminology before "
+    "running the search. This strategy will later also be used by document-driven search."
+)
+
+with st.expander("Build Search Strategy", expanded=True):
+
+    st.markdown("### Key Inventive Points")
+
+    _kip_text = st.text_area(
+        "Enter the key inventive points, one per line",
+        value="\n".join(
+            st.session_state.search_strategy.key_inventive_points
+            if st.session_state.search_strategy
+            else []
+        ),
+        height=100,
+        key="strategy_kip",
+        placeholder=(
+            "Example:\n"
+            "rechargeable battery\n"
+            "charging circuit"
+        ),
+    )
+
+    st.markdown("### Concepts")
+
+    _concept_count = st.number_input(
+        "Number of concepts",
+        min_value=1,
+        max_value=15,
+        value=3,
+        step=1,
+        key="strategy_concept_count",
+    )
+
+    _concepts = []
+
+    for _i in range(_concept_count):
+        st.markdown(f"#### Concept {_i + 1}")
+
+        _c1, _c2 = st.columns([3, 1])
+
+        with _c1:
+            _name = st.text_input(
+                "Concept name",
+                key=f"strategy_concept_name_{_i}",
+                placeholder="e.g. Lane Detection",
+            )
+
+        with _c2:
+            _importance = st.selectbox(
+                "Importance",
+                ["critical", "important", "supporting"],
+                key=f"strategy_concept_importance_{_i}",
+            )
+
+        _terms_raw = st.text_area(
+            "Alternative / similar patent terms — one per line",
+            key=f"strategy_concept_terms_{_i}",
+            height=100,
+            placeholder=(
+                "lane detection\n"
+                "lane recognition\n"
+                "lane boundary detection"
+            ),
+        )
+
+        _operator = st.selectbox(
+            "Operator within this concept",
+            ["OR", "AND"],
+            key=f"strategy_concept_operator_{_i}",
+        )
+
+        _terms = [
+            term.strip()
+            for term in _terms_raw.splitlines()
+            if term.strip()
+        ]
+
+        if _name.strip() or _terms:
+            _concepts.append(
+                SearchConcept(
+                    name=_name.strip(),
+                    importance=_importance,
+                    terms=_terms,
+                    operator=_operator,
+                )
+            )
+
+    st.markdown("### Relationship Between Concepts")
+
+    _concept_operator = st.selectbox(
+        "Combine concept groups with",
+        ["AND", "OR"],
+        key="strategy_concept_operator",
+    )
+
+    st.markdown("### Search Fields")
+
+    _f1, _f2, _f3 = st.columns(3)
+
+    with _f1:
+        _use_title = st.checkbox("Title", value=True, key="strategy_field_title")
+
+    with _f2:
+        _use_abstract = st.checkbox(
+            "Abstract",
+            value=True,
+            key="strategy_field_abstract",
+        )
+
+    with _f3:
+        _use_claims = st.checkbox(
+            "Claims",
+            value=True,
+            key="strategy_field_claims",
+        )
+
+    _search_fields = []
+
+    if _use_title:
+        _search_fields.append("title")
+
+    if _use_abstract:
+        _search_fields.append("abstract")
+
+    if _use_claims:
+        _search_fields.append("claims")
+
+    if st.button(
+        "💾 Build Search Strategy",
+        type="primary",
+        use_container_width=True,
+        key="build_search_strategy",
+    ):
+        _key_points = [
+            line.strip()
+            for line in _kip_text.splitlines()
+            if line.strip()
+        ]
+
+        st.session_state.search_strategy = SearchStrategy(
+            original_input=query,
+            key_inventive_points=_key_points,
+            concepts=_concepts,
+            concept_operator=_concept_operator,
+            search_fields=_search_fields,
+        )
+
+        st.session_state.search_strategy_approved = False
+
+    if st.session_state.search_strategy:
+
+        st.divider()
+        st.markdown("### Current Search Strategy")
+
+        _strategy = st.session_state.search_strategy
+
+        st.write(
+            f"**Original input:** {_strategy.original_input}"
+        )
+
+        if _strategy.key_inventive_points:
+            st.write("**Key inventive points:**")
+            for _point in _strategy.key_inventive_points:
+                st.write(f"- {_point}")
+
+        for _i, _concept in enumerate(_strategy.concepts, 1):
+            st.markdown(
+                f"**Concept {_i}: {_concept.name}** "
+                f"({_concept.importance})"
+            )
+
+            if _concept.terms:
+                st.write(
+                    f"{' ' + _concept.operator + ' '.join([])}".strip()
+                    if False
+                    else f"Terms ({_concept.operator}): "
+                    + " · ".join(_concept.terms)
+                )
+
+        st.write(
+            f"**Between concepts:** {_strategy.concept_operator}"
+        )
+
+        st.write(
+            f"**Search fields:** "
+            f"{', '.join(_strategy.search_fields) if _strategy.search_fields else 'None'}"
+        )
+
+        _boolean_search = build_boolean_search(_strategy)
+
+        if _boolean_search:
+            st.markdown("### Generated Boolean Search")
+            st.code(_boolean_search, language="text")
+
+        _uspto_strings = build_uspto_search_strings(_strategy)
+
+        if _uspto_strings:
+            st.markdown("### 🇺🇸 USPTO Search Strings")
+
+            for _field, _expression in _uspto_strings.items():
+                st.markdown(f"**{_field.title()}**")
+                st.code(_expression, language="text")
+
+        if st.button(
+            "✅ Approve Search Strategy",
+            use_container_width=True,
+            key="approve_search_strategy",
+        ):
+            st.session_state.search_strategy_approved = True
+
+        # ── Proximity Rules ────────────────────────────────────────────────
+        st.markdown("### Proximity Rules")
+
+        # Collect all terms currently defined in the concepts.
+        _strategy_terms = []
+
+        for _concept in _strategy.concepts:
+            for _term in _concept.terms:
+                _term = _term.strip()
+                if _term and _term not in _strategy_terms:
+                    _strategy_terms.append(_term)
+
+        if _strategy_terms:
+
+            _existing_rules = _strategy.proximity_rules
+
+            _rule_count = st.number_input(
+                "Number of proximity rules",
+                min_value=0,
+                max_value=10,
+                value=len(_existing_rules),
+                step=1,
+                key="strategy_proximity_count",
+            )
+
+            _proximity_rules = []
+
+            for _i in range(_rule_count):
+
+                st.markdown(f"#### Proximity Rule {_i + 1}")
+
+                _p1, _p2 = st.columns(2)
+
+                with _p1:
+                    _left_default = (
+                        _existing_rules[_i].left_term
+                        if _i < len(_existing_rules)
+                        else _strategy_terms[0]
+                    )
+
+                    _left_index = (
+                        _strategy_terms.index(_left_default)
+                        if _left_default in _strategy_terms
+                        else 0
+                    )
+
+                    _left_term = st.selectbox(
+                        "Left term",
+                        _strategy_terms,
+                        index=_left_index,
+                        key=f"strategy_proximity_left_{_i}",
+                    )
+
+                with _p2:
+                    _right_default = (
+                        _existing_rules[_i].right_term
+                        if _i < len(_existing_rules)
+                        else (
+                            _strategy_terms[1]
+                            if len(_strategy_terms) > 1
+                            else _strategy_terms[0]
+                        )
+                    )
+
+                    _right_index = (
+                        _strategy_terms.index(_right_default)
+                        if _right_default in _strategy_terms
+                        else 0
+                    )
+
+                    _right_term = st.selectbox(
+                        "Right term",
+                        _strategy_terms,
+                        index=_right_index,
+                        key=f"strategy_proximity_right_{_i}",
+                    )
+
+                _p3, _p4, _p5 = st.columns([1, 1, 2])
+
+                with _p3:
+                    _prox_operator = st.selectbox(
+                        "Operator",
+                        ["NEAR", "ADJ"],
+                        key=f"strategy_proximity_operator_{_i}",
+                    )
+
+                with _p4:
+                    _distance = st.number_input(
+                        "Distance",
+                        min_value=1,
+                        max_value=50,
+                        value=10,
+                        step=1,
+                        key=f"strategy_proximity_distance_{_i}",
+                    )
+
+                with _p5:
+                    _prox_field = st.selectbox(
+                        "Field",
+                        ["title", "abstract", "claims"],
+                        index=2,
+                        key=f"strategy_proximity_field_{_i}",
+                    )
+
+                _proximity_rules.append(
+                    ProximityRule(
+                        left_term=_left_term,
+                        right_term=_right_term,
+                        operator=_prox_operator,
+                        distance=int(_distance),
+                        field=_prox_field,
+                    )
+                )
+
+            if st.button(
+                "💾 Save Proximity Rules",
+                use_container_width=True,
+                key="save_proximity_rules",
+            ):
+                _strategy.proximity_rules = _proximity_rules
+                st.session_state.search_strategy = _strategy
+                st.session_state.search_strategy_approved = False
+                st.rerun()
+
+            # Display generated USPTO proximity expressions.
+            if _strategy.proximity_rules:
+                from services.search_strategy_service import (
+                    build_uspto_proximity_strings,
+                )
+
+                _proximity_strings = build_uspto_proximity_strings(
+                    _strategy
+                )
+
+                if _proximity_strings:
+                    st.markdown("#### Generated USPTO Proximity")
+
+                    for _expression in _proximity_strings:
+                        st.code(_expression, language="text")
+
+        else:
+            st.info(
+                "Add terms to your concepts before creating proximity rules."
+            )
+
+        if st.session_state.search_strategy_approved:
+            st.success(
+                "Search strategy approved — ready for search-string generation."
+            )
+
 
 # ── JSON format input ──────────────────────────────────────────────────────────
 _JSON_PLACEHOLDER = (
@@ -744,6 +1121,517 @@ with tab_search:
                 st.write(f"• {p.patent_id} — {p.patent_title}")
     else:
         st.info("Run the pipeline to see raw search results here.")
+
+    st.divider()
+    st.subheader("Classification Analysis")
+    st.caption(
+        "Classification frequency across the unique USPTO search results. "
+        "Patent IDs are retained for later refinement."
+    )
+
+    classification_data = aggregate_classifications(
+        st.session_state.unique_patents
+    )
+
+    # ── CPC ────────────────────────────────────────────────
+    cpc_data = classification_data.get("cpc", {})
+
+    if cpc_data:
+        st.markdown("### CPC")
+
+        cpc_rows = []
+        for classification, data in sorted(
+            cpc_data.items(),
+            key=lambda x: x[1]["count"],
+            reverse=True,
+        ):
+            cpc_rows.append(
+                {
+                    "CPC": classification,
+                    "Patents": data["count"],
+                    "% of results": round(
+                        data["count"]
+                        / len(st.session_state.unique_patents)
+                        * 100,
+                        1,
+                    ),
+                }
+            )
+
+        st.dataframe(
+            pd.DataFrame(cpc_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.markdown("#### Review CPC Classifications")
+
+        cpc_options = sorted(
+            cpc_data.keys(),
+            key=lambda classification: cpc_data[classification]["count"],
+            reverse=True,
+        )
+
+        selected_cpc = st.multiselect(
+            "Select CPC classifications for review",
+            options=cpc_options,
+            format_func=lambda classification: (
+                f"{classification} "
+                f"({cpc_data[classification]['count']} patents)"
+            ),
+            key="selected_cpc_classifications",
+        )
+
+        if selected_cpc:
+            patent_ids = []
+
+            for classification in selected_cpc:
+                for patent_id in cpc_data[classification]["patent_ids"]:
+                    if patent_id not in patent_ids:
+                        patent_ids.append(patent_id)
+
+            patent_lookup = {
+                patent.patent_id: patent
+                for patent in st.session_state.unique_patents
+            }
+
+            st.markdown(
+                f"**{len(patent_ids)} unique patent(s) "
+                f"associated with the selected CPC classification(s)**"
+            )
+
+            selected_patent_rows = []
+
+            for patent_id in patent_ids:
+                patent = patent_lookup.get(patent_id)
+
+                if patent:
+                    selected_patent_rows.append(
+                        {
+                            "Patent ID": patent.patent_id,
+                            "Title": patent.patent_title or "—",
+                            "Date": patent.patent_date or "—",
+                        }
+                    )
+
+            if selected_patent_rows:
+                st.dataframe(
+                    pd.DataFrame(selected_patent_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+    # ── USPC ───────────────────────────────────────────────
+    uspc_data = classification_data.get("uspc", {})
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("### USPC Class")
+
+        uspc_class_data = uspc_data.get("class", {})
+
+        uspc_class_rows = []
+        for classification, data in sorted(
+            uspc_class_data.items(),
+            key=lambda x: x[1]["count"],
+            reverse=True,
+        ):
+            uspc_class_rows.append(
+                {
+                    "USPC Class": classification,
+                    "Patents": data["count"],
+                    "% of results": round(
+                        data["count"]
+                        / len(st.session_state.unique_patents)
+                        * 100,
+                        1,
+                    ),
+                }
+            )
+
+        st.dataframe(
+            pd.DataFrame(uspc_class_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with col2:
+        st.markdown("### USPC Subclass")
+
+        uspc_subclass_data = uspc_data.get("subclass", {})
+
+        uspc_subclass_rows = []
+        for classification, data in sorted(
+            uspc_subclass_data.items(),
+            key=lambda x: x[1]["count"],
+            reverse=True,
+        ):
+            uspc_subclass_rows.append(
+                {
+                    "USPC Subclass": classification,
+                    "Patents": data["count"],
+                    "% of results": round(
+                        data["count"]
+                        / len(st.session_state.unique_patents)
+                        * 100,
+                        1,
+                    ),
+                }
+            )
+
+        st.dataframe(
+            pd.DataFrame(uspc_subclass_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # ── USPC Review ───────────────────────────────────────
+
+    st.markdown("#### Review USPC Classifications")
+
+    # -------------------------------------------------------
+    # USPC Class
+    # -------------------------------------------------------
+
+    uspc_class_options = sorted(
+        uspc_class_data.keys(),
+        key=lambda classification: uspc_class_data[classification]["count"],
+        reverse=True,
+    )
+
+    selected_uspc_classes = st.multiselect(
+        "Select USPC classes for review",
+        options=uspc_class_options,
+        format_func=lambda classification: (
+            f"{classification} "
+            f"({uspc_class_data[classification]['count']} patents)"
+        ),
+        key="selected_uspc_classes",
+    )
+
+    if selected_uspc_classes:
+        class_patent_ids = []
+
+        for classification in selected_uspc_classes:
+            for patent_id in uspc_class_data[classification]["patent_ids"]:
+                if patent_id not in class_patent_ids:
+                    class_patent_ids.append(patent_id)
+
+        patent_lookup = {
+            patent.patent_id: patent
+            for patent in st.session_state.unique_patents
+        }
+
+        st.markdown(
+            f"**{len(class_patent_ids)} unique patent(s) "
+            f"associated with the selected USPC class(es)**"
+        )
+
+        class_rows = []
+
+        for patent_id in class_patent_ids:
+            patent = patent_lookup.get(patent_id)
+
+            if patent:
+                class_rows.append(
+                    {
+                        "Patent ID": patent.patent_id,
+                        "Title": patent.patent_title or "—",
+                        "Date": patent.patent_date or "—",
+                    }
+                )
+
+        if class_rows:
+            st.dataframe(
+                pd.DataFrame(class_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    # -------------------------------------------------------
+    # USPC Subclass
+    # -------------------------------------------------------
+
+    uspc_subclass_options = sorted(
+        uspc_subclass_data.keys(),
+        key=lambda classification: (
+            uspc_subclass_data[classification]["count"]
+        ),
+        reverse=True,
+    )
+
+    selected_uspc_subclasses = st.multiselect(
+        "Select USPC subclasses for review",
+        options=uspc_subclass_options,
+        format_func=lambda classification: (
+            f"{classification} "
+            f"({uspc_subclass_data[classification]['count']} patents)"
+        ),
+        key="selected_uspc_subclasses",
+    )
+
+    if selected_uspc_subclasses:
+        subclass_patent_ids = []
+
+        for classification in selected_uspc_subclasses:
+            for patent_id in uspc_subclass_data[classification]["patent_ids"]:
+                if patent_id not in subclass_patent_ids:
+                    subclass_patent_ids.append(patent_id)
+
+        patent_lookup = {
+            patent.patent_id: patent
+            for patent in st.session_state.unique_patents
+        }
+
+        st.markdown(
+            f"**{len(subclass_patent_ids)} unique patent(s) "
+            f"associated with the selected USPC subclass(es)**"
+        )
+
+        subclass_rows = []
+
+        for patent_id in subclass_patent_ids:
+            patent = patent_lookup.get(patent_id)
+
+            if patent:
+                subclass_rows.append(
+                    {
+                        "Patent ID": patent.patent_id,
+                        "Title": patent.patent_title or "—",
+                        "Date": patent.patent_date or "—",
+                    }
+                )
+
+        if subclass_rows:
+            st.dataframe(
+                pd.DataFrame(subclass_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    # ── Classification Refinement ─────────────────────────
+
+    st.divider()
+    st.subheader("Classification Refinement")
+    st.caption(
+        "Review the selected classifications before applying "
+        "a refined USPTO search."
+    )
+
+    refinement_mode = st.radio(
+        "Refinement mode",
+        options=[
+            "Classification only",
+            "Original search + classification",
+        ],
+        horizontal=True,
+        key="classification_refinement_mode",
+    )
+
+    classification_operator = st.radio(
+        "Operator between selected classification groups",
+        options=["AND", "OR"],
+        horizontal=True,
+        key="classification_refinement_operator",
+    )
+
+    selected_cpc = st.session_state.get(
+        "selected_cpc_classifications",
+        [],
+    )
+
+    selected_uspc_classes = st.session_state.get(
+        "selected_uspc_classes",
+        [],
+    )
+
+    selected_uspc_subclasses = st.session_state.get(
+        "selected_uspc_subclasses",
+        [],
+    )
+
+    selected_classifications = []
+
+    # -------------------------------------------------------
+    # CPC selections
+    # -------------------------------------------------------
+
+    for classification in selected_cpc:
+        normalized_cpc = classification.replace(" ", "")
+        selected_classifications.append(
+            {
+                "type": "CPC",
+                "value": classification,
+                "query_value": f"{normalized_cpc}.CPC.",
+            }
+        )
+
+    # -------------------------------------------------------
+    # USPC class selections
+    # -------------------------------------------------------
+
+    for classification in selected_uspc_classes:
+        selected_classifications.append(
+            {
+                "type": "USPC Class",
+                "value": classification,
+                "query_value": f'"{classification}".CLAS.',
+            }
+        )
+
+    # -------------------------------------------------------
+    # USPC subclass selections
+    # -------------------------------------------------------
+    #
+    # A standalone subclass does not identify a complete
+    # USPC class/subclass pair, so we retain the selection
+    # for review but do not construct a live query from it.
+    # -------------------------------------------------------
+
+    for classification in selected_uspc_subclasses:
+        selected_classifications.append(
+            {
+                "type": "USPC Subclass",
+                "value": classification,
+                "query_value": None,
+            }
+        )
+
+    if selected_classifications:
+        st.markdown("#### Selected classifications")
+
+        refinement_rows = []
+
+        for item in selected_classifications:
+            refinement_rows.append(
+                {
+                    "Type": item["type"],
+                    "Classification": item["value"],
+                    "USPTO expression": (
+                        item["query_value"]
+                        if item["query_value"]
+                        else "Requires class/subclass pair"
+                    ),
+                }
+            )
+
+        st.dataframe(
+            pd.DataFrame(refinement_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # ---------------------------------------------------
+        # Build CPC-only preview
+        # ---------------------------------------------------
+
+        cpc_query_values = [
+            item["query_value"]
+            for item in selected_classifications
+            if item["type"] == "CPC"
+        ]
+
+        uspc_class_query_values = [
+            item["query_value"]
+            for item in selected_classifications
+            if item["type"] == "USPC Class"
+        ]
+
+        preview_groups = []
+
+        if cpc_query_values:
+            if len(cpc_query_values) == 1:
+                cpc_expression = cpc_query_values[0]
+            else:
+                cpc_expression = (
+                    "("
+                    + " OR ".join(cpc_query_values)
+                    + ")"
+                )
+
+            preview_groups.append(cpc_expression)
+
+        if uspc_class_query_values:
+            if len(uspc_class_query_values) == 1:
+                uspc_expression = uspc_class_query_values[0]
+            else:
+                uspc_expression = (
+                    "("
+                    + " OR ".join(uspc_class_query_values)
+                    + ")"
+                )
+
+            preview_groups.append(uspc_expression)
+
+        if preview_groups:
+            classification_query = (
+                f" {classification_operator} ".join(
+                    preview_groups
+                )
+            )
+
+            st.markdown("#### USPTO classification query preview")
+
+            st.code(
+                classification_query,
+                language="text",
+            )
+
+            if refinement_mode == "Original search + classification":
+                st.info(
+                    "The classification expression is shown for "
+                    "review only. The original search strategy will "
+                    "be combined with it in a later step."
+                )
+            else:
+                st.info(
+                    "The classification expression is shown for "
+                    "review only. No refined USPTO search has been "
+                    "executed."
+                )
+
+    else:
+        st.info(
+            "Select CPC or USPC classifications above to build "
+            "a refinement preview."
+        )
+
+    # ── IPC ────────────────────────────────────────────────
+    ipc_data = classification_data.get("ipc", {})
+
+    st.markdown("### IPC")
+
+    if ipc_data:
+        ipc_rows = []
+        for classification, data in sorted(
+            ipc_data.items(),
+            key=lambda x: x[1]["count"],
+            reverse=True,
+        ):
+            ipc_rows.append(
+                {
+                    "IPC": classification,
+                    "Patents": data["count"],
+                    "% of results": round(
+                        data["count"]
+                        / len(st.session_state.unique_patents)
+                        * 100,
+                        1,
+                    ),
+                }
+            )
+
+        st.dataframe(
+            pd.DataFrame(ipc_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info(
+            "No IPC classifications were returned by the current "
+            "USPTO ODP application-search response."
+        )
 
 # ── Tab 3: Technical Relevance ─────────────────────────────────────────────────────
 with tab_rank:

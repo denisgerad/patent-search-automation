@@ -33,6 +33,9 @@ if str(ROOT) not in sys.path:
 from app.config import settings
 from models.schemas import SearchStrategy, SearchConcept, ProximityRule
 from services.classification_service import aggregate_classifications
+from services.classification_refinement_service import (
+    filter_patents_by_classification,
+)
 from services.search_strategy_service import (
     build_boolean_search,
     build_uspto_search_strings,
@@ -70,6 +73,10 @@ _DEFAULTS = {
     # Phase 1 — manual search strategy
     "search_strategy": None,
     "search_strategy_approved": False,
+
+    # Classification refinement
+    "classification_refined_patents": [],
+    "classification_refinement_applied": False,
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -917,9 +924,43 @@ if run_to_top20 and query.strip():
             logger.warning("No patents returned for expanded queries: %s", expanded)
         else:
             # Stage 3 — technical relevance ranking
-            with st.spinner(f"Stage 3 — Technical relevance ranking {len(unique)} patents…"):
-                ranked = _timed("3. Embed + rank", _run_rank, query, unique, top_k)
-                logger.debug("Ranking result count: %d", len(ranked))
+            # Use classification-refined results when the user has
+            # explicitly applied classification refinement.
+            ranking_patents = unique
+
+            if st.session_state.get(
+                "classification_refinement_applied",
+                False,
+            ):
+                ranking_patents = st.session_state.get(
+                    "classification_refined_patents",
+                    unique,
+                )
+
+                logger.info(
+                    "Classification refinement active: "
+                    "%d → %d patents before ranking",
+                    len(unique),
+                    len(ranking_patents),
+                )
+
+            with st.spinner(
+                f"Stage 3 — Technical relevance ranking "
+                f"{len(ranking_patents)} patents…"
+            ):
+                ranked = _timed(
+                    "3. Embed + rank",
+                    _run_rank,
+                    query,
+                    ranking_patents,
+                    top_k,
+                )
+
+                logger.debug(
+                    "Ranking result count: %d",
+                    len(ranked),
+                )
+
             st.session_state.ranked = ranked
             st.session_state.stage = 3
             st.rerun()
@@ -1440,8 +1481,8 @@ with tab_search:
     st.divider()
     st.subheader("Classification Refinement")
     st.caption(
-        "Review the selected classifications before applying "
-        "a refined USPTO search."
+        "**Review the selected classifications before applying local "
+        "refinement to the current USPTO results.**"
     )
 
     refinement_mode = st.radio(
@@ -1533,7 +1574,7 @@ with tab_search:
                 {
                     "Type": item["type"],
                     "Classification": item["value"],
-                    "USPTO expression": (
+                    "Search expression": (
                         item["query_value"]
                         if item["query_value"]
                         else "Requires class/subclass pair"
@@ -1548,7 +1589,7 @@ with tab_search:
         )
 
         # ---------------------------------------------------
-        # Build CPC-only preview
+        # Classification query preview
         # ---------------------------------------------------
 
         cpc_query_values = [
@@ -1596,30 +1637,135 @@ with tab_search:
                 )
             )
 
-            st.markdown("#### USPTO classification query preview")
+            st.markdown("#### Classification query representation")
 
             st.code(
                 classification_query,
                 language="text",
             )
 
-            if refinement_mode == "Original search + classification":
-                st.info(
-                    "The classification expression is shown for "
-                    "review only. The original search strategy will "
-                    "be combined with it in a later step."
+        # ---------------------------------------------------
+        # Apply local classification refinement
+        # ---------------------------------------------------
+
+        st.markdown("#### Apply Classification Refinement")
+
+        st.caption(
+            "Classification refinement is applied locally to the "
+            "currently retrieved USPTO results."
+        )
+
+        if st.button(
+            "Apply Classification Refinement",
+            type="primary",
+            key="apply_classification_refinement",
+        ):
+            current_patents = st.session_state.get(
+                "unique_patents",
+                [],
+            )
+
+            if not current_patents:
+                st.warning(
+                    "No patent results are available for refinement."
                 )
             else:
-                st.info(
-                    "The classification expression is shown for "
-                    "review only. No refined USPTO search has been "
-                    "executed."
+                refined_patents = filter_patents_by_classification(
+                    current_patents,
+                    selected_cpc=selected_cpc,
+                    selected_uspc_class=selected_uspc_classes,
+                    selected_uspc_subclass=selected_uspc_subclasses,
+                    operator=classification_operator,
+                )
+
+                st.session_state.classification_refined_patents = (
+                    refined_patents
+                )
+
+                st.session_state.classification_refinement_applied = True
+
+                st.success(
+                    f"Classification refinement: "
+                    f"{len(current_patents)} → "
+                    f"{len(refined_patents)} patent(s)"
+                )
+
+                if refined_patents:
+                    # Re-rank the refined patent set immediately.
+                    with st.spinner(
+                        f"Ranking {len(refined_patents)} "
+                        "classification-refined patents…"
+                    ):
+                        ranked = _timed(
+                            "3. Embed + rank",
+                            _run_rank,
+                            query,
+                            refined_patents,
+                            top_k,
+                        )
+
+                    st.session_state.ranked = ranked
+                    st.session_state.stage = 3
+
+                    st.success(
+                        f"Ranking complete: "
+                        f"{len(ranked)} top-ranked patent(s) "
+                        f"from {len(refined_patents)} refined patent(s)."
+                    )
+
+        # ---------------------------------------------------
+        # Show refined results
+        # ---------------------------------------------------
+
+        if st.session_state.get(
+            "classification_refinement_applied",
+            False,
+        ):
+            refined_patents = st.session_state.get(
+                "classification_refined_patents",
+                [],
+            )
+
+            st.markdown("#### Classification-refined results")
+
+            st.write(
+                f"**{len(refined_patents)}** patent(s) match "
+                "the selected classifications."
+            )
+
+            if refined_patents:
+                refined_rows = []
+
+                for patent in refined_patents:
+                    refined_rows.append(
+                        {
+                            "Patent ID": patent.patent_id,
+                            "Title": patent.patent_title or "—",
+                            "Date": patent.patent_date or "—",
+                            "USPC": patent.uspc_class or "—",
+                            "USPC Subclass": (
+                                patent.uspc_subclass or "—"
+                            ),
+                            "CPC": ", ".join(
+                                patent.cpc_classifications
+                            ),
+                        }
+                    )
+
+                st.dataframe(
+                    pd.DataFrame(refined_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.warning(
+                    "No patents matched the selected classifications."
                 )
 
     else:
         st.info(
             "Select CPC or USPC classifications above to build "
-            "a refinement preview."
+            "a classification refinement."
         )
 
     # ── IPC ────────────────────────────────────────────────
@@ -1661,7 +1807,18 @@ with tab_search:
 # ── Tab 3: Technical Relevance ─────────────────────────────────────────────────────
 with tab_rank:
     if st.session_state.ranked:
-        total_unique = len(st.session_state.unique_patents)
+        ranking_source = st.session_state.get(
+            "classification_refined_patents",
+            st.session_state.unique_patents,
+        )
+
+        if not st.session_state.get(
+            "classification_refinement_applied",
+            False,
+        ):
+            ranking_source = st.session_state.unique_patents
+
+        total_unique = len(ranking_source)
         shown        = len(st.session_state.ranked)
         filtered_out = total_unique - shown
         st.success(

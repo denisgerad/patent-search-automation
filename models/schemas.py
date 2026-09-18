@@ -38,16 +38,12 @@ class SearchConcept(BaseModel):
 
 
 class ProximityRule(BaseModel):
-    """A structured proximity relationship between two search terms."""
+    """A structured relationship between two search terms."""
 
     left_term: str
     right_term: str
-
-    operator: Literal["ADJ", "NEAR"] = "ADJ"
-
-    # Number of searchable terms allowed between the two terms.
-    distance: int = 1
-
+    operator: Literal["ADJ", "NEAR", "WITH", "SAME"] = "ADJ"
+    distance: Optional[int] = 1
     field: Literal["title", "abstract", "claims"] = "claims"
 
 

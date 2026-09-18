@@ -36,6 +36,7 @@ from services.classification_service import aggregate_classifications
 from services.search_strategy_service import (
     build_boolean_search,
     build_uspto_search_strings,
+    build_uspto_proximity_strings,
 )
 
 # ── page config ────────────────────────────────────────────────────────────────
@@ -232,6 +233,10 @@ with st.expander("Build Search Strategy", expanded=True):
                 "lane boundary detection"
             ),
         )
+        st.caption(
+            "Enter one search term per line. Wildcards such as comput$ "
+            "can be entered directly."
+        )
 
         _operator = st.selectbox(
             "Operator within this concept",
@@ -378,149 +383,169 @@ with st.expander("Build Search Strategy", expanded=True):
         ):
             st.session_state.search_strategy_approved = True
 
-        # ── Proximity Rules ────────────────────────────────────────────────
+        # ── Proximity Rules ────────────────────────────────────
+
         st.markdown("### Proximity Rules")
+        st.caption(
+            "Define relationships between search terms. "
+            "Distance applies to ADJ and NEAR."
+        )
 
-        # Collect all terms currently defined in the concepts.
-        _strategy_terms = []
+        all_strategy_terms = []
 
-        for _concept in _strategy.concepts:
-            for _term in _concept.terms:
-                _term = _term.strip()
-                if _term and _term not in _strategy_terms:
-                    _strategy_terms.append(_term)
+        for concept in st.session_state.search_strategy.concepts:
+            for term in concept.terms:
+                term = term.strip()
+                if term and term not in all_strategy_terms:
+                    all_strategy_terms.append(term)
 
-        if _strategy_terms:
-
-            _existing_rules = _strategy.proximity_rules
-
-            _rule_count = st.number_input(
+        if all_strategy_terms:
+            proximity_count = st.number_input(
                 "Number of proximity rules",
                 min_value=0,
                 max_value=10,
-                value=len(_existing_rules),
+                value=len(st.session_state.search_strategy.proximity_rules),
                 step=1,
-                key="strategy_proximity_count",
+                key="proximity_rule_count",
             )
 
-            _proximity_rules = []
+            proximity_rules = []
 
-            for _i in range(_rule_count):
+            for i in range(proximity_count):
+                st.markdown(f"**Proximity Rule {i + 1}**")
 
-                st.markdown(f"#### Proximity Rule {_i + 1}")
+                col1, col2, col3 = st.columns(3)
 
-                _p1, _p2 = st.columns(2)
+                existing_rule = (
+                    st.session_state.search_strategy.proximity_rules[i]
+                    if i < len(st.session_state.search_strategy.proximity_rules)
+                    else None
+                )
 
-                with _p1:
-                    _left_default = (
-                        _existing_rules[_i].left_term
-                        if _i < len(_existing_rules)
-                        else _strategy_terms[0]
-                    )
+                with col1:
+                    default_left_index = 0
 
-                    _left_index = (
-                        _strategy_terms.index(_left_default)
-                        if _left_default in _strategy_terms
-                        else 0
-                    )
+                    if existing_rule:
+                        if existing_rule.left_term in all_strategy_terms:
+                            default_left_index = all_strategy_terms.index(
+                                existing_rule.left_term
+                            )
 
-                    _left_term = st.selectbox(
+                    left_term = st.selectbox(
                         "Left term",
-                        _strategy_terms,
-                        index=_left_index,
-                        key=f"strategy_proximity_left_{_i}",
+                        all_strategy_terms,
+                        index=default_left_index,
+                        key=f"proximity_left_{i}",
                     )
 
-                with _p2:
-                    _right_default = (
-                        _existing_rules[_i].right_term
-                        if _i < len(_existing_rules)
-                        else (
-                            _strategy_terms[1]
-                            if len(_strategy_terms) > 1
-                            else _strategy_terms[0]
-                        )
-                    )
+                with col2:
+                    operators = [
+                        "ADJ",
+                        "NEAR",
+                        "WITH",
+                        "SAME",
+                    ]
 
-                    _right_index = (
-                        _strategy_terms.index(_right_default)
-                        if _right_default in _strategy_terms
-                        else 0
-                    )
+                    default_operator_index = 0
 
-                    _right_term = st.selectbox(
-                        "Right term",
-                        _strategy_terms,
-                        index=_right_index,
-                        key=f"strategy_proximity_right_{_i}",
-                    )
+                    if existing_rule:
+                        if existing_rule.operator in operators:
+                            default_operator_index = operators.index(
+                                existing_rule.operator
+                            )
 
-                _p3, _p4, _p5 = st.columns([1, 1, 2])
-
-                with _p3:
-                    _prox_operator = st.selectbox(
+                    operator = st.selectbox(
                         "Operator",
-                        ["NEAR", "ADJ"],
-                        key=f"strategy_proximity_operator_{_i}",
+                        operators,
+                        index=default_operator_index,
+                        key=f"proximity_operator_{i}",
                     )
 
-                with _p4:
-                    _distance = st.number_input(
+                with col3:
+                    default_right_index = (
+                        1 if len(all_strategy_terms) > 1 else 0
+                    )
+
+                    if existing_rule:
+                        if existing_rule.right_term in all_strategy_terms:
+                            default_right_index = all_strategy_terms.index(
+                                existing_rule.right_term
+                            )
+
+                    right_term = st.selectbox(
+                        "Right term",
+                        all_strategy_terms,
+                        index=default_right_index,
+                        key=f"proximity_right_{i}",
+                    )
+
+                distance = 1
+
+                if operator in {"ADJ", "NEAR"}:
+                    distance = st.number_input(
                         "Distance",
                         min_value=1,
                         max_value=50,
-                        value=10,
+                        value=(
+                            existing_rule.distance
+                            if existing_rule and existing_rule.distance
+                            else 1
+                        ),
                         step=1,
-                        key=f"strategy_proximity_distance_{_i}",
+                        key=f"proximity_distance_{i}",
                     )
 
-                with _p5:
-                    _prox_field = st.selectbox(
-                        "Field",
-                        ["title", "abstract", "claims"],
-                        index=2,
-                        key=f"strategy_proximity_field_{_i}",
-                    )
+                field = st.selectbox(
+                    "Field",
+                    ["title", "abstract", "claims"],
+                    index=2,
+                    key=f"proximity_field_{i}",
+                )
 
-                _proximity_rules.append(
+                proximity_rules.append(
                     ProximityRule(
-                        left_term=_left_term,
-                        right_term=_right_term,
-                        operator=_prox_operator,
-                        distance=int(_distance),
-                        field=_prox_field,
+                        left_term=left_term,
+                        right_term=right_term,
+                        operator=operator,
+                        distance=distance,
+                        field=field,
                     )
                 )
+
+                st.divider()
 
             if st.button(
-                "💾 Save Proximity Rules",
-                use_container_width=True,
+                "Save Proximity Rules",
                 key="save_proximity_rules",
             ):
-                _strategy.proximity_rules = _proximity_rules
-                st.session_state.search_strategy = _strategy
-                st.session_state.search_strategy_approved = False
-                st.rerun()
+                if st.session_state.search_strategy:
+                    st.session_state.search_strategy.proximity_rules = (
+                        proximity_rules
+                    )
 
-            # Display generated USPTO proximity expressions.
-            if _strategy.proximity_rules:
-                from services.search_strategy_service import (
-                    build_uspto_proximity_strings,
-                )
+                    st.session_state.search_strategy_approved = False
+
+                    st.success(
+                        f"Saved {len(proximity_rules)} proximity rule(s)."
+                    )
+
+            # ── Generated proximity expressions ────────────────────
+
+            if st.session_state.search_strategy.proximity_rules:
+                st.markdown("### Generated USPTO Proximity Search")
 
                 _proximity_strings = build_uspto_proximity_strings(
-                    _strategy
+                    st.session_state.search_strategy
                 )
 
                 if _proximity_strings:
-                    st.markdown("#### Generated USPTO Proximity")
-
                     for _expression in _proximity_strings:
                         st.code(_expression, language="text")
 
         else:
             st.info(
-                "Add terms to your concepts before creating proximity rules."
+                "Add search concepts and terms before defining "
+                "proximity rules."
             )
 
         if st.session_state.search_strategy_approved:

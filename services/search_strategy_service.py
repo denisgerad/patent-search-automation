@@ -102,16 +102,12 @@ def build_uspto_search_strings(strategy: SearchStrategy) -> dict[str, str]:
     return results
 
 
-def build_uspto_proximity_expression(
-    rule,
-) -> str:
+def build_uspto_proximity_expression(rule) -> str:
     """
-    Build a USPTO proximity expression.
+    Build a USPTO Patent Public Search proximity expression.
 
-    Examples:
-        reading ADJ non-invasive
-        reading ADJ4 "non invasive"
-        reading NEAR10 "non invasive"
+    ADJ and NEAR may use a numeric distance.
+    WITH and SAME are represented without a numeric distance.
     """
 
     left = _format_term(rule.left_term)
@@ -122,20 +118,27 @@ def build_uspto_proximity_expression(
 
     operator = rule.operator.upper()
 
-    if operator not in {"ADJ", "NEAR"}:
+    if operator not in {"ADJ", "NEAR", "WITH", "SAME"}:
         raise ValueError(
             f"Unsupported proximity operator: {rule.operator}"
         )
 
-    if rule.distance < 1:
-        raise ValueError("Proximity distance must be >= 1")
+    # WITH and SAME do not use the numeric-distance form here.
+    if operator in {"WITH", "SAME"}:
+        proximity_operator = operator
 
-    # USPTO uses ADJ by itself for adjacency and ADJn / NEARn
-    # when a distance is specified.
-    if operator == "ADJ" and rule.distance == 1:
-        proximity_operator = "ADJ"
     else:
-        proximity_operator = f"{operator}{rule.distance}"
+        distance = rule.distance or 1
+
+        if distance < 1:
+            raise ValueError(
+                "Proximity distance must be >= 1"
+            )
+
+        if operator == "ADJ" and distance == 1:
+            proximity_operator = "ADJ"
+        else:
+            proximity_operator = f"{operator}{distance}"
 
     return f"({left} {proximity_operator} {right})"
 

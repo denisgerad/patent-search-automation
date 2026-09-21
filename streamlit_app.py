@@ -32,6 +32,13 @@ if str(ROOT) not in sys.path:
 
 from app.config import settings
 from models.schemas import SearchStrategy, SearchConcept, ProximityRule
+from services.ai_classification_service import (
+    generate_classification_suggestions,
+)
+from services.classification_definition_service import (
+    get_cpc_definition,
+    get_uspc_definition,
+)
 from services.classification_service import aggregate_classifications
 from services.classification_refinement_service import (
     filter_patents_by_classification,
@@ -177,6 +184,133 @@ st.caption(
     "Define the important concepts and alternative patent terminology before "
     "running the search. This strategy will later also be used by document-driven search."
 )
+
+# ── AI-assisted concept generation ────────────────────────────────────────────
+st.markdown("### 🤖 AI-Assisted Search Concepts")
+st.caption(
+    "Claude can propose 10 technical concepts and 3 patent-search keywords "
+    "for each. Review and edit the suggestions before using them in the search strategy."
+)
+
+if "ai_search_concepts" not in st.session_state:
+    st.session_state.ai_search_concepts = []
+
+if "ai_search_concepts_approved" not in st.session_state:
+    st.session_state.ai_search_concepts_approved = False
+
+_ai_invention = st.text_area(
+    "Invention description for Claude",
+    value=st.session_state.get("query", ""),
+    height=100,
+    key="ai_invention_description",
+    help="Describe the invention or technology you want to search for.",
+)
+
+if st.button("🤖 Generate 10 Search Concepts", key="generate_ai_search_concepts"):
+    if not _ai_invention.strip():
+        st.warning("Please enter an invention description first.")
+    else:
+        try:
+            from models.claude_client import ClaudeClient
+            from services.ai_search_strategy_service import generate_search_concepts
+
+            with st.spinner("Claude is generating search concepts…"):
+                generated = generate_search_concepts(
+                    _ai_invention,
+                    ClaudeClient(),
+                )
+
+            st.session_state.ai_search_concepts = generated
+            st.session_state.ai_search_concepts_approved = False
+            st.success(
+                f"Generated {len(generated)} concepts. "
+                "Review and edit them below."
+            )
+
+        except Exception as exc:
+            st.error(f"Unable to generate search concepts: {exc}")
+
+_ai_concepts = st.session_state.get("ai_search_concepts", [])
+
+if _ai_concepts:
+    st.markdown("#### Review and edit Claude's suggestions")
+
+    edited_concepts = []
+
+    for index, concept in enumerate(_ai_concepts, start=1):
+        st.markdown(f"**Concept {index}**")
+
+        concept_name = st.text_input(
+            "Concept name",
+            value=concept.get("name", ""),
+            key=f"ai_concept_name_{index}",
+        )
+
+        keywords = concept.get("keywords", [])
+        edited_keywords = []
+
+        for keyword_index in range(3):
+            default_keyword = (
+                keywords[keyword_index]
+                if keyword_index < len(keywords)
+                else ""
+            )
+
+            edited_keyword = st.text_input(
+                f"Keyword {keyword_index + 1}",
+                value=default_keyword,
+                key=f"ai_concept_{index}_keyword_{keyword_index + 1}",
+            )
+
+            edited_keywords.append(edited_keyword)
+
+        edited_concepts.append(
+            {
+                "name": concept_name,
+                "keywords": edited_keywords,
+            }
+        )
+
+        if index < len(_ai_concepts):
+            st.divider()
+
+    st.session_state.ai_search_concepts = edited_concepts
+
+    if st.button(
+        "✅ Approve Reviewed Concepts",
+        key="approve_ai_search_concepts",
+    ):
+        st.session_state.ai_search_concepts_approved = True
+
+        # Populate the existing manual Search Strategy fields.
+        st.session_state.strategy_concept_count = len(edited_concepts)
+
+        for _index, _concept in enumerate(edited_concepts):
+            st.session_state[f"strategy_concept_name_{_index}"] = (
+                _concept.get("name", "").strip()
+            )
+
+            st.session_state[f"strategy_concept_terms_{_index}"] = "\n".join(
+                keyword.strip()
+                for keyword in _concept.get("keywords", [])
+                if keyword.strip()
+            )
+
+            # Let the user decide importance in the existing UI.
+            st.session_state[f"strategy_concept_importance_{_index}"] = "important"
+
+            # Claude's three keywords are alternatives by default.
+            st.session_state[f"strategy_concept_operator_{_index}"] = "OR"
+
+        st.success(
+            "Reviewed concepts approved and loaded into the Search Strategy."
+        )
+
+    if st.session_state.get("ai_search_concepts_approved", False):
+        st.info(
+            "The reviewed concepts are approved. "
+            "No patent search has been executed yet."
+        )
 
 with st.expander("Build Search Strategy", expanded=True):
 
@@ -1232,6 +1366,23 @@ with tab_search:
 
         st.markdown("#### Review CPC Classifications")
 
+        # Load reviewed AI classifications into the refinement
+        # widgets before those widgets are instantiated.
+        if "ai_pending_cpc_classifications" in st.session_state:
+            st.session_state.selected_cpc_classifications = (
+                st.session_state.pop("ai_pending_cpc_classifications")
+            )
+
+        if "ai_pending_uspc_classes" in st.session_state:
+            st.session_state.selected_uspc_classes = (
+                st.session_state.pop("ai_pending_uspc_classes")
+            )
+
+        if "ai_pending_uspc_subclasses" in st.session_state:
+            st.session_state.selected_uspc_subclasses = (
+                st.session_state.pop("ai_pending_uspc_subclasses")
+            )
+
         cpc_options = sorted(
             cpc_data.keys(),
             key=lambda classification: cpc_data[classification]["count"],
@@ -1474,6 +1625,342 @@ with tab_search:
                 pd.DataFrame(subclass_rows),
                 use_container_width=True,
                 hide_index=True,
+            )
+
+    # ── AI-Assisted Classification Suggestions ─────────────
+
+    st.divider()
+    st.subheader("🤖 AI-Assisted Classification Suggestions")
+    st.caption(
+        "Claude can suggest potentially relevant CPC and USPC classifications "
+        "from the approved search concepts. Review the suggestions and the "
+        "authoritative USPTO definitions before selecting any classification. "
+        "Suggestions are not automatically applied."
+    )
+
+    _ai_concepts = []
+
+    for _index in range(
+        st.session_state.get("strategy_concept_count", 0)
+    ):
+        _name = st.session_state.get(
+            f"strategy_concept_name_{_index}",
+            "",
+        ).strip()
+
+        _terms_text = st.session_state.get(
+            f"strategy_concept_terms_{_index}",
+            "",
+        )
+
+        _terms = [
+            term.strip()
+            for term in _terms_text.splitlines()
+            if term.strip()
+        ]
+
+        if _name or _terms:
+            _ai_concepts.append(
+                {
+                    "name": _name,
+                    "terms": _terms,
+                }
+            )
+
+    if not _ai_concepts:
+        st.info(
+            "Approve the search concepts first to generate "
+            "AI classification suggestions."
+        )
+    else:
+        if st.button(
+            "🤖 Generate Classification Suggestions",
+            key="generate_ai_classifications",
+        ):
+            try:
+                from models.claude_client import ClaudeClient
+
+                with st.spinner(
+                    "Claude is analyzing the approved concepts..."
+                ):
+                    _suggestions = generate_classification_suggestions(
+                        _ai_concepts,
+                        ClaudeClient(),
+                    )
+
+                st.session_state.ai_classification_suggestions = _suggestions
+
+            except Exception as exc:
+                st.error(
+                    f"Unable to generate classification suggestions: {exc}"
+                )
+
+    _ai_classifications = st.session_state.get(
+        "ai_classification_suggestions"
+    )
+
+    if _ai_classifications:
+        st.markdown("### Review AI Suggestions")
+
+        st.caption(
+            "The definitions below are retrieved from USPTO classification "
+            "sources. They are provided for review; selecting a classification "
+            "is still a user decision."
+        )
+
+        _ai_cpc = _ai_classifications.get("cpc", [])
+        _ai_uspc = _ai_classifications.get("uspc", [])
+
+        if _ai_cpc:
+            st.markdown("#### Suggested CPC Classifications")
+
+            for _index, _item in enumerate(_ai_cpc):
+                _classification = (
+                    _item.get("classification", "").strip()
+                )
+
+                _concept = _item.get("concept", "").strip()
+                _reason = _item.get("reason", "").strip()
+
+                if not _classification:
+                    continue
+
+                _definition = get_cpc_definition(_classification)
+
+                _normalized_cpc = (
+                    _classification.replace(" ", "").upper()
+                )
+
+                _result_count = sum(
+                    1
+                    for _patent in st.session_state.unique_patents
+                    if any(
+                        str(_cpc).replace(" ", "").upper()
+                        == _normalized_cpc
+                        for _cpc in _patent.cpc_classifications
+                    )
+                )
+
+                _checkbox_key = (
+                    f"ai_cpc_selected_{_index}_{_classification}"
+                )
+
+                st.markdown(
+                    f"**{_classification}**"
+                    f" — {_concept or 'Related technical concept'}"
+                )
+
+                col1, col2 = st.columns([3, 1])
+
+                with col1:
+                    if _reason:
+                        st.write(
+                            f"**AI rationale:** {_reason}"
+                        )
+
+                    if _definition:
+                        with st.expander(
+                            "View USPTO definition",
+                            expanded=False,
+                        ):
+                            st.write(_definition)
+                    else:
+                        st.warning(
+                            "USPTO definition could not be retrieved."
+                        )
+
+                with col2:
+                    st.metric(
+                        "Current results",
+                        _result_count,
+                    )
+
+                    st.checkbox(
+                        "Select",
+                        key=_checkbox_key,
+                    )
+
+                st.divider()
+
+        if _ai_uspc:
+            st.markdown("#### Suggested USPC Classifications")
+
+            for _index, _item in enumerate(_ai_uspc):
+                _uspc_class = (
+                    _item.get("class", "").strip()
+                )
+
+                _uspc_subclass = (
+                    _item.get("subclass", "").strip()
+                )
+
+                _concept = _item.get("concept", "").strip()
+                _reason = _item.get("reason", "").strip()
+
+                if not _uspc_class:
+                    continue
+
+                _uspc_label = _uspc_class
+
+                if _uspc_subclass:
+                    _uspc_label = (
+                        f"{_uspc_class}/{_uspc_subclass}"
+                    )
+
+                _definition = get_uspc_definition(
+                    _uspc_class,
+                    _uspc_subclass,
+                )
+
+                _normalized_uspc_class = str(
+                    _uspc_class
+                ).strip().upper()
+
+                _normalized_uspc_subclass = str(
+                    _uspc_subclass
+                ).strip().upper()
+
+                if _uspc_subclass:
+                    _result_count = sum(
+                        1
+                        for _patent in st.session_state.unique_patents
+                        if (
+                            str(_patent.uspc_class).strip().upper()
+                            == _normalized_uspc_class
+                            and
+                            str(_patent.uspc_subclass).strip().upper()
+                            == _normalized_uspc_subclass
+                        )
+                    )
+                else:
+                    _result_count = sum(
+                        1
+                        for _patent in st.session_state.unique_patents
+                        if (
+                            str(_patent.uspc_class).strip().upper()
+                            == _normalized_uspc_class
+                        )
+                    )
+
+                _checkbox_key = (
+                    f"ai_uspc_selected_{_index}_{_uspc_label}"
+                )
+
+                st.markdown(
+                    f"**USPC {_uspc_label}**"
+                    f" — {_concept or 'Related technical concept'}"
+                )
+
+                col1, col2 = st.columns([3, 1])
+
+                with col1:
+                    if _reason:
+                        st.write(
+                            f"**AI rationale:** {_reason}"
+                        )
+
+                    if _definition:
+                        with st.expander(
+                            "View USPTO definition",
+                            expanded=False,
+                        ):
+                            st.write(_definition)
+                    else:
+                        st.warning(
+                            "USPTO definition could not be retrieved."
+                        )
+
+                with col2:
+                    st.metric(
+                        "Current results",
+                        _result_count,
+                    )
+
+                    st.checkbox(
+                        "Select",
+                        key=_checkbox_key,
+                    )
+
+                st.divider()
+
+        if st.button(
+            "✅ Apply Reviewed AI Classifications",
+            key="apply_reviewed_ai_classifications",
+        ):
+            _selected_ai_cpc = []
+
+            for _index, _item in enumerate(_ai_cpc):
+                _classification = (
+                    _item.get("classification", "").strip()
+                )
+
+                if not _classification:
+                    continue
+
+                _checkbox_key = (
+                    f"ai_cpc_selected_{_index}_{_classification}"
+                )
+
+                if st.session_state.get(_checkbox_key, False):
+                    _selected_ai_cpc.append(_classification)
+
+            _selected_ai_uspc_classes = []
+            _selected_ai_uspc_subclasses = []
+
+            for _index, _item in enumerate(_ai_uspc):
+                _uspc_class = (
+                    _item.get("class", "").strip()
+                )
+
+                _uspc_subclass = (
+                    _item.get("subclass", "").strip()
+                )
+
+                if not _uspc_class:
+                    continue
+
+                _uspc_label = _uspc_class
+
+                if _uspc_subclass:
+                    _uspc_label = (
+                        f"{_uspc_class}/{_uspc_subclass}"
+                    )
+
+                _checkbox_key = (
+                    f"ai_uspc_selected_{_index}_{_uspc_label}"
+                )
+
+                if st.session_state.get(_checkbox_key, False):
+                    if _uspc_class not in _selected_ai_uspc_classes:
+                        _selected_ai_uspc_classes.append(
+                            _uspc_class
+                        )
+
+                    if _uspc_subclass:
+                        if (
+                            _uspc_subclass
+                            not in _selected_ai_uspc_subclasses
+                        ):
+                            _selected_ai_uspc_subclasses.append(
+                                _uspc_subclass
+                            )
+
+            st.session_state.ai_pending_cpc_classifications = (
+                _selected_ai_cpc
+            )
+
+            st.session_state.ai_pending_uspc_classes = (
+                _selected_ai_uspc_classes
+            )
+
+            st.session_state.ai_pending_uspc_subclasses = (
+                _selected_ai_uspc_subclasses
+            )
+
+            st.success(
+                "Reviewed AI classifications are ready for "
+                "Classification Refinement. Review them there "
+                "before applying the refinement."
             )
 
     # ── Classification Refinement ─────────────────────────

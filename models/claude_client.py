@@ -5,7 +5,11 @@ Thin wrapper around the Anthropic SDK.
 Responsibility: call the model, return a string.
 No prompt logic lives here — prompts are owned by the calling service.
 """
-import anthropic
+
+try:
+    import anthropic
+except ModuleNotFoundError:  # pragma: no cover - handled at runtime.
+    anthropic = None
 
 from app.config import settings
 
@@ -20,11 +24,30 @@ class ClaudeClient:
     )
 
     def __init__(self, model: str | None = None, max_tokens: int = 4096):
+        if anthropic is None:
+            raise ModuleNotFoundError(
+                "The 'anthropic' package is required to use ClaudeClient. "
+                "Install project dependencies first."
+            )
+
         # Pass the key explicitly from settings so it works regardless of whether
         # ANTHROPIC_API_KEY is set as an OS environment variable.
         self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
         self.model = (model or settings.anthropic_model or self._FALLBACK_MODELS[0]).strip()
         self.max_tokens = max_tokens
+
+    def generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int | None = None,
+    ) -> str:
+        """Compatibility wrapper for service-layer code that expects generate()."""
+        return self.complete(
+            system=system_prompt,
+            user=user_prompt,
+            max_tokens=max_tokens,
+        )
 
     def complete(self, system: str, user: str, max_tokens: int | None = None) -> str:
         """

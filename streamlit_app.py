@@ -31,9 +31,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.config import settings
+from models.claude_client import ClaudeClient
 from models.schemas import SearchStrategy, SearchConcept, ProximityRule
 from services.ai_classification_service import (
     generate_classification_suggestions,
+)
+from services.ai_invention_structure_service import (
+    generate_invention_structure,
+    build_search_paths_from_structure,
 )
 from services.classification_definition_service import (
     get_cpc_definition,
@@ -84,6 +89,7 @@ _DEFAULTS = {
     # Classification refinement
     "classification_refined_patents": [],
     "classification_refinement_applied": False,
+    "ai_invention_structure": None,
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -311,6 +317,284 @@ if _ai_concepts:
             "The reviewed concepts are approved. "
             "No patent search has been executed yet."
         )
+
+st.markdown("### 🧩 AI Invention Structure")
+
+st.caption(
+    "Claude can decompose the invention into application, core system, "
+    "sensors, functions, and objects, then generate structured patent-search "
+    "paths. Review and edit the structure before generating search paths."
+)
+
+_invention_for_structure = st.session_state.get(
+    "ai_invention_description",
+    "",
+).strip()
+
+if _invention_for_structure:
+    if st.button(
+        "🧩 Build Invention Search Structure",
+        key="build_ai_invention_structure",
+    ):
+        try:
+            with st.spinner(
+                "Claude is building the invention search structure..."
+            ):
+                _structure = generate_invention_structure(
+                    _invention_for_structure,
+                    ClaudeClient(),
+                )
+
+            st.session_state.ai_invention_structure = _structure
+            st.session_state.ai_search_path_generation = (
+                st.session_state.get("ai_search_path_generation", 0) + 1
+            )
+            st.session_state.ai_search_paths_approved = False
+
+        except Exception as exc:
+            st.error(
+                f"Unable to build invention search structure: {exc}"
+            )
+
+_structure = st.session_state.get(
+    "ai_invention_structure"
+)
+
+if _structure:
+    st.markdown("#### Review Invention Structure")
+
+    st.caption(
+        "Edit the suggested terminology as needed. "
+        "Regenerate the search paths after making changes."
+    )
+
+    _roles = [
+        ("Application", "application"),
+        ("Core System", "core_system"),
+        ("Sensors", "sensors"),
+        ("Functions", "functions"),
+        ("Objects", "objects"),
+    ]
+
+    _edited_structure = {}
+
+    _role_columns = st.columns(5)
+
+    for _column, (_label, _key) in zip(
+        _role_columns,
+        _roles,
+    ):
+        with _column:
+            st.markdown(f"**{_label}**")
+
+            _current_terms = _structure.get(
+                _key,
+                [],
+            )
+
+            _edited_text = st.text_area(
+                _label,
+                value="\n".join(_current_terms),
+                key=f"ai_structure_edit_{_key}",
+                height=220,
+                label_visibility="collapsed",
+            )
+
+            _edited_structure[_key] = [
+                _term.strip()
+                for _term in _edited_text.splitlines()
+                if _term.strip()
+            ]
+
+    st.session_state.ai_edited_invention_structure = (
+        _edited_structure
+    )
+
+    if st.button(
+        "🔄 Regenerate Search Paths",
+        key="regenerate_ai_search_paths",
+    ):
+        _reviewed_structure = st.session_state.get(
+            "ai_edited_invention_structure",
+            {},
+        )
+
+        _updated_structure = {
+            "application": list(
+                _reviewed_structure.get("application", [])
+            ),
+            "core_system": list(
+                _reviewed_structure.get("core_system", [])
+            ),
+            "sensors": list(
+                _reviewed_structure.get("sensors", [])
+            ),
+            "functions": list(
+                _reviewed_structure.get("functions", [])
+            ),
+            "objects": list(
+                _reviewed_structure.get("objects", [])
+            ),
+        }
+
+        _updated_structure["search_paths"] = (
+            build_search_paths_from_structure(
+                _updated_structure
+            )
+        )
+
+        st.session_state.ai_invention_structure = (
+            _updated_structure
+        )
+        st.session_state.ai_search_path_generation = (
+            st.session_state.get("ai_search_path_generation", 0) + 1
+        )
+
+        st.session_state.ai_edited_invention_structure = (
+            _updated_structure
+        )
+
+        st.session_state.ai_search_paths_approved = False
+        st.session_state.ai_approved_search_paths = []
+
+        for _index in range(6):
+            st.session_state.pop(
+                f"ai_search_path_expression_{_index}",
+                None,
+            )
+            st.session_state.pop(
+                f"ai_search_path_selected_{_index}",
+                None,
+            )
+
+        st.rerun()
+
+    st.markdown("#### Generated Search Paths")
+
+    st.caption(
+        "Select the search paths you want to review. "
+        "You can also edit the Boolean expression before approval."
+    )
+
+    _paths = _structure.get(
+        "search_paths",
+        [],
+    )
+
+    _selected_search_paths = []
+
+    for _index, _path in enumerate(_paths):
+        _path_name = str(
+            _path.get("name", "")
+        ).strip()
+
+        if not _path_name:
+            continue
+
+        _expression = str(
+            _path.get("expression", "")
+        ).strip()
+
+        _purpose = str(
+            _path.get("purpose", "")
+        ).strip()
+
+        _selected = st.checkbox(
+            _path_name,
+            key=f"ai_search_path_selected_{_index}",
+        )
+
+        if _selected:
+            _selected_search_paths.append(
+                _index
+            )
+
+        if _purpose:
+            st.caption(_purpose)
+
+        st.text_area(
+            f"Search expression — {_path_name}",
+            value=_expression,
+            key=(
+                f"ai_search_path_expression_"
+                f"{st.session_state.get('ai_search_path_generation', 0)}_"
+                f"{_index}"
+            ),
+            height=90,
+        )
+
+        st.divider()
+
+    if _selected_search_paths:
+        st.markdown(
+            f"**{len(_selected_search_paths)} search path(s) selected**"
+        )
+    else:
+        st.info(
+            "Select at least one search path to approve it."
+        )
+
+    if st.button(
+        "✅ Approve Selected Search Paths",
+        key="approve_ai_search_paths",
+        disabled=not _selected_search_paths,
+    ):
+        _approved_paths = []
+
+        for _index in _selected_search_paths:
+            _path = _paths[_index]
+
+            _approved_paths.append(
+                {
+                    "name": str(
+                        _path.get("name", "")
+                    ).strip(),
+                    "roles": list(
+                        _path.get("roles", [])
+                    ),
+                    "expression": st.session_state.get(
+                        (
+                            f"ai_search_path_expression_"
+                            f"{st.session_state.get('ai_search_path_generation', 0)}_"
+                            f"{_index}"
+                        ),
+                        "",
+                    ).strip(),
+                    "purpose": str(
+                        _path.get("purpose", "")
+                    ).strip(),
+                }
+            )
+
+        st.session_state.ai_approved_search_paths = (
+            _approved_paths
+        )
+
+        st.session_state.ai_search_paths_approved = True
+
+        st.success(
+            f"{len(_approved_paths)} search path(s) approved "
+            "for the next search stage."
+        )
+
+    if st.session_state.get(
+        "ai_search_paths_approved",
+        False,
+    ):
+        st.markdown("#### Approved Search Paths")
+
+        for _path in st.session_state.get(
+            "ai_approved_search_paths",
+            [],
+        ):
+            st.markdown(
+                f"**{_path['name']}**"
+            )
+
+            st.code(
+                _path["expression"],
+                language="text",
+            )
 
 with st.expander("Build Search Strategy", expanded=True):
 

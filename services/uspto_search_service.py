@@ -324,21 +324,90 @@ def _build_patent_record(raw: dict) -> PatentRecord | None:
         return None
 
 
-def _build_odp_query(query: str) -> str:
-    """Convert an application search phrase into an ODP title query."""
+def _build_odp_query(
+    query: str,
+    cpc_classifications: list[str] | None = None,
+    uspc_classes: list[str] | None = None,
+    classification_operator: str = "AND",
+) -> str:
+    """Build an ODP application-search query.
+
+    The original query remains an invention-title search.
+    Optional CPC and USPC class criteria are added as field-qualified
+    Boolean clauses.
+    """
 
     query = " ".join(query.split()).strip()
 
     if not query:
         return query
 
-    return f'applicationMetaData.inventionTitle:"{query}"'
+    title_clause = f'applicationMetaData.inventionTitle:"{query}"'
+
+    classification_groups = []
+
+    # CPC classifications: OR within the CPC group.
+    if cpc_classifications:
+        cpc_terms = []
+
+        for classification in cpc_classifications:
+            normalized = " ".join(str(classification).split()).strip()
+            normalized = normalized.replace(" ", "")
+
+            if normalized:
+                cpc_terms.append(
+                    f"applicationMetaData.cpcClassificationBag:{normalized}"
+                )
+
+        if cpc_terms:
+            classification_groups.append(
+                "(" + " OR ".join(cpc_terms) + ")"
+            )
+
+    # USPC classes: OR within the USPC group.
+    if uspc_classes:
+        uspc_terms = []
+
+        for classification in uspc_classes:
+            normalized = str(classification).strip()
+
+            if normalized:
+                uspc_terms.append(
+                    f"applicationMetaData.class:{normalized}"
+                )
+
+        if uspc_terms:
+            classification_groups.append(
+                "(" + " OR ".join(uspc_terms) + ")"
+            )
+
+    if not classification_groups:
+        return title_clause
+
+    operator = (
+        classification_operator.strip().upper()
+        if classification_operator
+        else "AND"
+    )
+
+    if operator not in {"AND", "OR"}:
+        operator = "AND"
+
+    return (
+        title_clause
+        + f" {operator} "
+        + f" {operator} ".join(classification_groups)
+    )
 
 
 def search_patents(
     query: str,
     limit: int = 25,
     offset: int = 0,
+    *,
+    cpc_classifications: list[str] | None = None,
+    uspc_classes: list[str] | None = None,
+    classification_operator: str = "AND",
 ) -> list[PatentRecord]:
     """Search USPTO ODP and return PatentRecord objects.
 
@@ -346,7 +415,12 @@ def search_patents(
     """
 
     headers = _build_headers()
-    odp_query = _build_odp_query(query)
+    odp_query = _build_odp_query(
+        query,
+        cpc_classifications=cpc_classifications,
+        uspc_classes=uspc_classes,
+        classification_operator=classification_operator,
+    )
 
     params = {
         "q": odp_query,
@@ -423,6 +497,146 @@ def search_patents(
 
     log.info(
         "USPTO ODP search complete: %d records",
+        len(records),
+    )
+
+    return records
+
+
+def search_patents_with_classification(
+    query: str,
+    limit: int = 25,
+    offset: int = 0,
+    *,
+    cpc_classifications: list[str] | None = None,
+    uspc_classes: list[str] | None = None,
+    classification_operator: str = "AND",
+) -> list[PatentRecord]:
+    """Search USPTO ODP using structured classification filters.
+
+    The text query remains in the ODP q parameter.
+    CPC and USPC classifications are sent through the structured
+    filters parameter.
+    """
+
+    headers = _build_headers()
+    headers["Content-Type"] = "application/json"
+
+    query = " ".join(query.split()).strip()
+
+    if not query:
+        return []
+
+    filters = []
+
+    if cpc_classifications:
+        cpc_values = []
+
+        for classification in cpc_classifications:
+            normalized = " ".join(
+                str(classification).split()
+            ).strip()
+
+            if normalized:
+                cpc_values.append(
+                    normalized.replace(" ", "")
+                )
+
+        if cpc_values:
+            filters.append(
+                {
+                    "name": "applicationMetaData.cpcClassificationBag",
+                    "value": cpc_values,
+                }
+            )
+
+    if uspc_classes:
+        uspc_values = []
+
+        for classification in uspc_classes:
+            normalized = str(classification).strip()
+
+            if normalized:
+                uspc_values.append(normalized)
+
+        if uspc_values:
+            filters.append(
+                {
+                    "name": "applicationMetaData.class",
+                    "value": uspc_values,
+                }
+            )
+
+    payload = {
+        "q": f'applicationMetaData.inventionTitle:"{query}"',
+        "filters": filters,
+        "pagination": {
+            "offset": offset,
+            "limit": min(limit, 100),
+        },
+    }
+
+    log.info(
+        "USPTO ODP classified search: %s -> %s",
+        query,
+        payload,
+    )
+
+    try:
+        response = requests.post(
+            USPTO_SEARCH_URL,
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+
+    except requests.exceptions.RequestException as exc:
+        log.error(
+            "USPTO ODP classified search network error: %s",
+            exc,
+        )
+        return []
+
+    if response.status_code != 200:
+        log.error(
+            "USPTO ODP classified search failed: %s — %s",
+            response.status_code,
+            response.text[:500],
+        )
+        return []
+
+    try:
+        data = response.json()
+
+    except ValueError:
+        log.error(
+            "USPTO ODP classified search returned invalid JSON"
+        )
+        return []
+
+    raw_records = data.get(
+        "patentFileWrapperDataBag",
+        [],
+    )
+
+    log.info(
+        "USPTO ODP classified raw records: %d",
+        len(raw_records),
+    )
+
+    records: list[PatentRecord] = []
+
+    for raw in raw_records:
+        if not isinstance(raw, dict):
+            continue
+
+        patent = _build_patent_record(raw)
+
+        if patent is not None:
+            records.append(patent)
+
+    log.info(
+        "USPTO ODP classified search complete: %d records",
         len(records),
     )
 

@@ -2405,8 +2405,9 @@ with tab_search:
         st.markdown("#### Apply Classification Refinement")
 
         st.caption(
-            "Classification refinement is applied locally to the "
-            "currently retrieved USPTO results."
+            "Classification only filters the current USPTO results locally. "
+            "Original search + classification reruns the original USPTO search "
+            "with the selected classification criteria."
         )
 
         if st.button(
@@ -2419,53 +2420,163 @@ with tab_search:
                 [],
             )
 
-            if not current_patents:
+            # -------------------------------------------------------
+            # Validate classification selection
+            # -------------------------------------------------------
+
+            if not selected_cpc and not selected_uspc_classes:
                 st.warning(
-                    "No patent results are available for refinement."
-                )
-            else:
-                refined_patents = filter_patents_by_classification(
-                    current_patents,
-                    selected_cpc=selected_cpc,
-                    selected_uspc_class=selected_uspc_classes,
-                    selected_uspc_subclass=selected_uspc_subclasses,
-                    operator=classification_operator,
+                    "Select at least one CPC classification or USPC class "
+                    "before applying classification refinement."
                 )
 
-                st.session_state.classification_refined_patents = (
-                    refined_patents
-                )
+            # -------------------------------------------------------
+            # Mode 1 — Classification only
+            # -------------------------------------------------------
 
-                st.session_state.classification_refinement_applied = True
+            elif refinement_mode == "Classification only":
 
-                st.success(
-                    f"Classification refinement: "
-                    f"{len(current_patents)} → "
-                    f"{len(refined_patents)} patent(s)"
-                )
+                if not current_patents:
+                    st.warning(
+                        "No patent results are available for refinement."
+                    )
 
-                if refined_patents:
-                    # Re-rank the refined patent set immediately.
-                    with st.spinner(
-                        f"Ranking {len(refined_patents)} "
-                        "classification-refined patents…"
-                    ):
-                        ranked = _timed(
-                            "3. Embed + rank",
-                            _run_rank,
-                            query,
-                            refined_patents,
-                            top_k,
-                        )
+                else:
+                    refined_patents = filter_patents_by_classification(
+                        current_patents,
+                        selected_cpc=selected_cpc,
+                        selected_uspc_class=selected_uspc_classes,
+                        selected_uspc_subclass=selected_uspc_subclasses,
+                        operator=classification_operator,
+                    )
 
-                    st.session_state.ranked = ranked
-                    st.session_state.stage = 3
+                    st.session_state.classification_refined_patents = (
+                        refined_patents
+                    )
+
+                    st.session_state.classification_refinement_applied = True
 
                     st.success(
-                        f"Ranking complete: "
-                        f"{len(ranked)} top-ranked patent(s) "
-                        f"from {len(refined_patents)} refined patent(s)."
+                        f"Classification refinement: "
+                        f"{len(current_patents)} → "
+                        f"{len(refined_patents)} patent(s)"
                     )
+
+                    if refined_patents:
+                        with st.spinner(
+                            f"Ranking {len(refined_patents)} "
+                            "classification-refined patents…"
+                        ):
+                            ranked = _timed(
+                                "3. Embed + rank",
+                                _run_rank,
+                                query,
+                                refined_patents,
+                                top_k,
+                            )
+
+                        st.session_state.ranked = ranked
+                        st.session_state.stage = 3
+
+                        st.success(
+                            f"Ranking complete: "
+                            f"{len(ranked)} top-ranked patent(s) "
+                            f"from {len(refined_patents)} refined patent(s)."
+                        )
+
+            # -------------------------------------------------------
+            # Mode 2 — Original search + classification
+            # -------------------------------------------------------
+
+            else:
+
+                if settings.search_backend.lower() != "uspto":
+                    st.warning(
+                        "Original search + classification is currently "
+                        "implemented for the USPTO ODP backend."
+                    )
+
+                elif not query.strip():
+                    st.warning(
+                        "The original search query is empty."
+                    )
+
+                else:
+                    from services.search_service import fetch_patents_with_fallback
+                    from services.dedup_service import deduplicate
+
+                    tokens = (
+                        st.session_state
+                        .get("expansion_metadata", {})
+                        .get("tokens")
+                    )
+
+                    validated_queries = (
+                        st.session_state
+                        .get("expansion_metadata", {})
+                        .get("validated_queries", [])
+                    )
+
+                    if tokens is None:
+                        st.warning(
+                            "Search token information is unavailable. "
+                            "Please run the original search again."
+                        )
+                        st.stop()
+
+                    with st.spinner(
+                        "Rerunning the original USPTO search "
+                        "with classification criteria…"
+                    ):
+                        raw_classified = _timed(
+                            "2. Original search + classification",
+                            fetch_patents_with_fallback,
+                            tokens,
+                            validated_queries,
+                            15,
+                            cpc_classifications=selected_cpc,
+                            uspc_classes=selected_uspc_classes,
+                            classification_operator=classification_operator,
+                        )
+
+                    unique_classified = deduplicate(raw_classified)
+
+                    # Store the new USPTO result set as the active result set.
+                    st.session_state.raw_patents = raw_classified
+                    st.session_state.unique_patents = unique_classified
+
+                    st.session_state.classification_refined_patents = (
+                        unique_classified
+                    )
+
+                    st.session_state.classification_refinement_applied = True
+
+                    st.success(
+                        f"Original search + classification: "
+                        f"{len(unique_classified)} unique patent(s) returned."
+                    )
+
+                    if unique_classified:
+                        with st.spinner(
+                            f"Ranking {len(unique_classified)} "
+                            "classification-filtered USPTO patents…"
+                        ):
+                            ranked = _timed(
+                                "3. Embed + rank",
+                                _run_rank,
+                                query,
+                                unique_classified,
+                                top_k,
+                            )
+
+                        st.session_state.ranked = ranked
+                        st.session_state.stage = 3
+
+                        st.success(
+                            f"Ranking complete: "
+                            f"{len(ranked)} top-ranked patent(s) "
+                            f"from {len(unique_classified)} USPTO patent(s)."
+                        )
 
         # ---------------------------------------------------
         # Show refined results

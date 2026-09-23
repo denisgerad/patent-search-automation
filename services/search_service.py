@@ -425,6 +425,10 @@ def fetch_patents_with_fallback(
     tokens,
     validated_queries: list[str],
     min_results: int = 15,
+    *,
+    cpc_classifications: list[str] | None = None,
+    uspc_classes: list[str] | None = None,
+    classification_operator: str = "AND",
 ) -> list[PatentRecord]:
     """
     Three-stage search with progressively broader queries.
@@ -458,7 +462,10 @@ def fetch_patents_with_fallback(
     # USPTO ODP backend
     # ------------------------------------------------------------------
     if settings.patent_search_backend == "uspto":
-        from services.uspto_search_service import search_patents
+        from services.uspto_search_service import (
+            search_patents,
+            search_patents_with_classification,
+        )
 
         all_patents = []
 
@@ -466,11 +473,22 @@ def fetch_patents_with_fallback(
         # Mistral-generated natural-language expansions are better handled
         # later by semantic ranking rather than exact title matching.
         for token in tokens.critical_tokens:
-            results = search_patents(
-                query=token,
-                limit=25,
-                offset=0,
-            )
+            if cpc_classifications or uspc_classes:
+                results = search_patents_with_classification(
+                    query=token,
+                    limit=25,
+                    offset=0,
+                    cpc_classifications=cpc_classifications,
+                    uspc_classes=uspc_classes,
+                    classification_operator=classification_operator,
+                )
+            else:
+                results = search_patents(
+                    query=token,
+                    limit=25,
+                    offset=0,
+                )
+
             all_patents.extend(results)
 
         return all_patents

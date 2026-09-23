@@ -1650,23 +1650,6 @@ with tab_search:
 
         st.markdown("#### Review CPC Classifications")
 
-        # Load reviewed AI classifications into the refinement
-        # widgets before those widgets are instantiated.
-        if "ai_pending_cpc_classifications" in st.session_state:
-            st.session_state.selected_cpc_classifications = (
-                st.session_state.pop("ai_pending_cpc_classifications")
-            )
-
-        if "ai_pending_uspc_classes" in st.session_state:
-            st.session_state.selected_uspc_classes = (
-                st.session_state.pop("ai_pending_uspc_classes")
-            )
-
-        if "ai_pending_uspc_subclasses" in st.session_state:
-            st.session_state.selected_uspc_subclasses = (
-                st.session_state.pop("ai_pending_uspc_subclasses")
-            )
-
         cpc_options = sorted(
             cpc_data.keys(),
             key=lambda classification: cpc_data[classification]["count"],

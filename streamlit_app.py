@@ -750,63 +750,121 @@ with st.expander("Build Search Strategy", expanded=True):
     if st.session_state.search_strategy:
 
         st.divider()
-        st.markdown("### Current Search Strategy")
+        st.markdown("# ── Active Search Strategy ────────────────────────────────────────────────")
 
-        _strategy = st.session_state.search_strategy
+        if "active_search_strategy_source" not in st.session_state:
+            st.session_state.active_search_strategy_source = "concepts"
 
-        st.write(
-            f"**Original input:** {_strategy.original_input}"
+        strategy_source = st.radio(
+            "Search Strategy Source",
+            options=["concepts", "invention_structure"],
+            format_func=lambda value: {
+                "concepts": "AI-Assisted Search Concepts",
+                "invention_structure": "AI Invention Structure",
+            }[value],
+            horizontal=True,
+            key="active_search_strategy_source",
         )
 
-        if _strategy.key_inventive_points:
-            st.write("**Key inventive points:**")
-            for _point in _strategy.key_inventive_points:
-                st.write(f"- {_point}")
+        if strategy_source == "concepts":
+            st.markdown("### Current Search Strategy")
 
-        for _i, _concept in enumerate(_strategy.concepts, 1):
-            st.markdown(
-                f"**Concept {_i}: {_concept.name}** "
-                f"({_concept.importance})"
+            # ── AI-Assisted Search Concepts ───────────────────────────────
+            _strategy = st.session_state.search_strategy
+
+            st.write(
+                f"**Original input:** {_strategy.original_input}"
             )
 
-            if _concept.terms:
-                st.write(
-                    f"{' ' + _concept.operator + ' '.join([])}".strip()
-                    if False
-                    else f"Terms ({_concept.operator}): "
-                    + " · ".join(_concept.terms)
+            if _strategy.key_inventive_points:
+                st.write("**Key inventive points:**")
+                for _point in _strategy.key_inventive_points:
+                    st.write(f"- {_point}")
+
+            for _i, _concept in enumerate(_strategy.concepts, 1):
+                st.markdown(
+                    f"**Concept {_i}: {_concept.name}** "
+                    f"({_concept.importance})"
                 )
 
-        st.write(
-            f"**Between concepts:** {_strategy.concept_operator}"
-        )
+                if _concept.terms:
+                    st.write(
+                        f"{' ' + _concept.operator + ' '.join([])}".strip()
+                        if False
+                        else f"Terms ({_concept.operator}): "
+                        + " · ".join(_concept.terms)
+                    )
 
-        st.write(
-            f"**Search fields:** "
-            f"{', '.join(_strategy.search_fields) if _strategy.search_fields else 'None'}"
-        )
+            st.write(
+                f"**Between concepts:** {_strategy.concept_operator}"
+            )
 
-        _boolean_search = build_boolean_search(_strategy)
+            st.write(
+                f"**Search fields:** "
+                f"{', '.join(_strategy.search_fields) if _strategy.search_fields else 'None'}"
+            )
 
-        if _boolean_search:
-            st.markdown("### Generated Boolean Search")
-            st.code(_boolean_search, language="text")
+            _boolean_search = build_boolean_search(_strategy)
 
-        _uspto_strings = build_uspto_search_strings(_strategy)
+            if _boolean_search:
+                st.markdown("### Generated Boolean Search")
+                st.code(_boolean_search, language="text")
 
-        if _uspto_strings:
-            st.markdown("### 🇺🇸 USPTO Search Strings")
+            _uspto_strings = build_uspto_search_strings(_strategy)
 
-            for _field, _expression in _uspto_strings.items():
-                st.markdown(f"**{_field.title()}**")
-                st.code(_expression, language="text")
+            if _uspto_strings:
+                st.markdown("### 🇺🇸 USPTO Search Strings")
 
-        if st.button(
-            "✅ Approve Search Strategy",
-            use_container_width=True,
-            key="approve_search_strategy",
-        ):
-            st.session_state.search_strategy_approved = True
+                for _field, _expression in _uspto_strings.items():
+                    st.markdown(f"**{_field.title()}**")
+                    st.code(_expression, language="text")
+
+            if st.button(
+                "✅ Approve Search Strategy",
+                use_container_width=True,
+                key="approve_search_strategy",
+            ):
+                st.session_state.search_strategy_approved = True
+
+        else:
+
+            # ── AI Invention Structure ────────────────────────────────────
+            st.markdown("### Approved Search Paths")
+            st.markdown("**Source: AI Invention Structure**")
+
+            if st.session_state.get(
+                "ai_search_paths_approved",
+                False,
+            ):
+                _approved_paths = st.session_state.get(
+                    "ai_approved_search_paths",
+                    [],
+                )
+
+                st.markdown(
+                    f"**Approved Search Paths: {len(_approved_paths)}**"
+                )
+
+                for _path in _approved_paths:
+                    st.markdown(
+                        f"**{_path['name']}**"
+                    )
+
+                    if _path.get("purpose"):
+                        st.caption(
+                            _path["purpose"]
+                        )
+
+                    st.code(
+                        _path.get("expression", ""),
+                        language="text",
+                    )
+
+            else:
+                st.info(
+                    "No AI Invention Structure search paths have "
+                    "been approved yet."
+                )
 
         # ── Proximity Rules ────────────────────────────────────
 
@@ -1106,6 +1164,84 @@ def _run_search(queries: list[str]) -> tuple[list, list]:
     from services.dedup_service import deduplicate
     backend = settings.search_backend.lower()
 
+    # Approved AI Invention Structure search paths
+    if (
+        st.session_state.get("ai_search_paths_approved", False)
+        and st.session_state.get("ai_approved_search_paths")
+        and backend == "uspto"
+        and settings.patentsview_api_key
+    ):
+        from services.uspto_search_service import (
+            search_patents_by_strategy,
+        )
+
+        approved_paths = st.session_state.get(
+            "ai_approved_search_paths",
+            [],
+        )
+
+        raw = []
+
+        for path in approved_paths:
+            expression = str(path.get("expression", "")).strip()
+
+            if not expression:
+                continue
+
+            logger.info(
+                "AI PATH QUERY [%s]: %s",
+                path.get("name", ""),
+                expression,
+            )
+
+            results = search_patents_by_strategy(
+                query=expression,
+                limit=100,
+                offset=0,
+            )
+
+            logger.info(
+                "AI Invention Structure path '%s' query: %s",
+                path.get("name", ""),
+                expression,
+            )
+
+            logger.info(
+                "AI Invention Structure path '%s' returned %d results",
+                path.get("name", ""),
+                len(results),
+            )
+
+            raw.extend(results)
+
+        unique = deduplicate(raw)
+        return raw, unique
+
+    # Approved manual Search Strategy
+    if (
+        st.session_state.get("search_strategy_approved", False)
+        and st.session_state.get("search_strategy") is not None
+        and backend == "uspto"
+        and settings.patentsview_api_key
+    ):
+        from services.search_strategy_service import build_boolean_search
+        from services.uspto_search_service import search_patents_by_strategy
+
+        strategy = st.session_state.search_strategy
+        strategy_query = build_boolean_search(strategy)
+
+        if strategy_query:
+            raw = search_patents_by_strategy(
+                query=strategy_query,
+                limit=100,
+                offset=0,
+            )
+        else:
+            raw = []
+
+        unique = deduplicate(raw)
+        return raw, unique
+
     if backend == "epo" and settings.epo_consumer_key:
         from services.epo_search_service import epo_fetch_by_keywords
         meta = st.session_state.get("expansion_metadata", {})
@@ -1255,10 +1391,41 @@ def _badges_for(title: str, abstract: str, groups: list) -> str:
 
 if run_to_top20 and query.strip():
     logger.info("Run to Top 20 clicked — starting pipeline for query: %s", query)
-    # Preserve JSON query text across the reset
+    # Preserve JSON query and approved search state across the reset
     _saved_json = st.session_state.json_query
+
+    _saved_ai_paths_approved = st.session_state.get(
+        "ai_search_paths_approved",
+        False,
+    )
+    _saved_ai_approved_paths = st.session_state.get(
+        "ai_approved_search_paths",
+        [],
+    )
+
+    _saved_strategy = st.session_state.get(
+        "search_strategy",
+    )
+    _saved_strategy_approved = st.session_state.get(
+        "search_strategy_approved",
+        False,
+    )
+
     _reset()
+
     st.session_state.json_query = _saved_json
+
+    st.session_state.ai_search_paths_approved = (
+        _saved_ai_paths_approved
+    )
+    st.session_state.ai_approved_search_paths = (
+        _saved_ai_approved_paths
+    )
+
+    st.session_state.search_strategy = _saved_strategy
+    st.session_state.search_strategy_approved = (
+        _saved_strategy_approved
+    )
 
     # Determine whether to use the pasted JSON or Mistral expansion
     _active_json = st.session_state.json_query.strip()

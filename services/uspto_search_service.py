@@ -503,6 +503,64 @@ def search_patents(
     return records
 
 
+def search_patents_by_strategy(
+    query: str,
+    limit: int = 25,
+    offset: int = 0,
+) -> list[PatentRecord]:
+    """Search USPTO ODP using a provider-ready Boolean strategy expression.
+
+    Unlike search_patents(), this function sends the supplied expression
+    directly as the ODP q parameter. It is intended for approved
+    SearchStrategy expressions.
+    """
+    headers = _build_headers()
+    headers["Content-Type"] = "application/json"
+
+    query = " ".join(str(query).split()).strip()
+
+    if not query:
+        return []
+
+    payload = {
+        "q": query,
+        "pagination": {
+            "offset": offset,
+            "limit": min(limit, 100),
+        },
+    }
+
+    response = requests.post(
+        USPTO_SEARCH_URL,
+        headers=headers,
+        json=payload,
+        timeout=30,
+    )
+
+    if response.status_code == 404:
+        log.warning(
+            "USPTO strategy search returned no matching records "
+            "for query: %s",
+            query,
+        )
+        return []
+
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"USPTO strategy search failed "
+            f"({response.status_code}): {response.text[:500]}"
+        )
+
+    data = response.json()
+
+    raw_records = data.get("patentFileWrapperDataBag", [])
+
+    return [
+        _build_patent_record(raw)
+        for raw in raw_records
+    ]
+
+
 def search_patents_with_classification(
     query: str,
     limit: int = 25,

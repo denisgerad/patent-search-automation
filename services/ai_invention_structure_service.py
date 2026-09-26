@@ -33,9 +33,14 @@ sensors:
 Sensors, sensing technologies, cameras, detectors, or input devices.
 
 functions:
-Actions performed by the invention. Prefer patent-search verbs such as:
-detect, determine, identify, recognize, measure, classify, estimate,
-monitor, calculate, control.
+The specific technical functions performed by the invention.
+Describe what the invention actually does in its stated application.
+Prefer concise invention-specific phrases such as "lane detection",
+"lane recognition", "lane tracking", "lane marking detection",
+rather than generic verbs such as "detect", "identify", or "classify".
+Do not replace the invention-specific function with generic search verbs.
+If useful, provide closely related technical function phrases,
+but keep them specific to the invention.
 
 objects:
 The thing being detected, measured, identified, controlled, or processed.
@@ -57,7 +62,9 @@ Rules:
 - Do not invent technical features not supported by the invention.
 - Keep terms suitable for patent searching.
 - Prefer concise noun phrases.
-- Functions should be verbs or verb stems suitable for wildcard searching.
+- Functions should remain invention-specific technical phrases.
+- Do not use generic wildcard verb stems for functions.
+- Multi-word function phrases should be quoted in search expressions.
 - Search paths should contain Boolean expressions.
 - Use OR between synonyms within a role.
 - Use AND between different roles.
@@ -270,7 +277,7 @@ def build_search_paths_from_structure(
 
     function_expr = _role_expression(
         functions,
-        wildcard=True,
+        wildcard=False,
     )
 
     object_expr = _role_expression(
@@ -279,125 +286,107 @@ def build_search_paths_from_structure(
 
     paths = []
 
-    def add_path(
-        name: str,
-        roles: list[str],
-        expressions: list[str],
-        purpose: str,
-    ):
-        expressions = [
-            expression
-            for expression in expressions
-            if expression
-        ]
-
-        if not expressions:
-            return
-
+    # 1. Core + Function
+    if core_expr and function_expr:
         paths.append(
             {
-                "name": name,
-                "roles": roles,
-                "expression": "\nAND\n".join(
-                    expressions
+                "name": "Core + Function",
+                "roles": ["core_system", "functions"],
+                "expression": (
+                    f"{core_expr}\n"
+                    "AND\n"
+                    f"{function_expr}"
                 ),
-                "purpose": purpose,
+                "purpose": (
+                    "Search the core application/system together with its "
+                    "primary functions."
+                ),
             }
         )
 
-    # 1. Sensor + Function
-    add_path(
-        "Sensor + Function",
-        ["sensors", "functions"],
-        [
-            sensor_expr,
-            function_expr,
-        ],
-        (
-            "Find patents describing the sensing technology "
-            "performing the relevant function."
-        ),
-    )
+    # 2. Sensor + Function
+    if sensor_expr and function_expr:
+        paths.append(
+            {
+                "name": "Sensor + Function",
+                "roles": ["sensors", "functions"],
+                "expression": (
+                    f"{sensor_expr}\n"
+                    "AND\n"
+                    f"{function_expr}"
+                ),
+                "purpose": (
+                    "Search the sensing technology together with the "
+                    "functions it performs."
+                ),
+            }
+        )
 
-    # 2. Core + Function + Sensor
-    add_path(
-        "Core + Function + Sensor",
-        ["core_system", "functions", "sensors"],
-        [
-            core_expr,
-            function_expr,
-            sensor_expr,
-        ],
-        (
-            "Find patents combining the core system, "
-            "its function, and the sensor technology."
-        ),
-    )
+    # 3. Core + Sensor
+    if core_expr and sensor_expr:
+        paths.append(
+            {
+                "name": "Core + Sensor",
+                "roles": ["core_system", "sensors"],
+                "expression": (
+                    f"{core_expr}\n"
+                    "AND\n"
+                    f"{sensor_expr}"
+                ),
+                "purpose": (
+                    "Search the application/core system together with "
+                    "its sensing technology."
+                ),
+            }
+        )
 
-    # 3. Sensor + Object + Function
-    add_path(
-        "Sensor + Object + Function",
-        ["sensors", "objects", "functions"],
-        [
-            sensor_expr,
-            object_expr,
-            function_expr,
-        ],
-        (
-            "Find patents where the sensor performs the "
-            "relevant function on the target object."
-        ),
-    )
+    # 4. Core + Function + Sensor
+    if core_expr and function_expr and sensor_expr:
+        paths.append(
+            {
+                "name": "Core + Function + Sensor",
+                "roles": [
+                    "core_system",
+                    "functions",
+                    "sensors",
+                ],
+                "expression": (
+                    f"{core_expr}\n"
+                    "AND\n"
+                    f"{function_expr}\n"
+                    "AND\n"
+                    f"{sensor_expr}"
+                ),
+                "purpose": (
+                    "Narrow search requiring the core application, "
+                    "function, and sensing technology together."
+                ),
+            }
+        )
 
-    # 4. Core + Sensor + Object
-    add_path(
-        "Core + Sensor + Object",
-        ["core_system", "sensors", "objects"],
-        [
-            core_expr,
-            sensor_expr,
-            object_expr,
-        ],
-        (
-            "Find patents combining the core system, "
-            "sensor technology, and target object."
-        ),
-    )
-
-    # 5. Application + Core + Sensor + Object
-    add_path(
-        "Application + Core + Sensor + Object",
-        [
-            "application",
-            "core_system",
-            "sensors",
-            "objects",
-        ],
-        [
-            application_expr,
-            core_expr,
-            sensor_expr,
-            object_expr,
-        ],
-        (
-            "Find patents describing the complete "
-            "application-specific technical combination."
-        ),
-    )
-
-    # 6. Function + Object
-    add_path(
-        "Function + Object",
-        ["functions", "objects"],
-        [
-            function_expr,
-            object_expr,
-        ],
-        (
-            "Find patents describing the relevant function "
-            "performed on the target object."
-        ),
-    )
+    # 5. Sensor + Object + Function
+    if sensor_expr and object_expr and function_expr:
+        paths.append(
+            {
+                "name": "Sensor + Object + Function",
+                "roles": [
+                    "sensors",
+                    "objects",
+                    "functions",
+                ],
+                "expression": (
+                    f"{sensor_expr}\n"
+                    "AND\n"
+                    f"{object_expr}\n"
+                    "AND\n"
+                    f"{function_expr}"
+                ),
+                "purpose": (
+                    "Search the sensing technology in relation to "
+                    "specific objects and functions."
+                ),
+            }
+        )
 
     return paths
 

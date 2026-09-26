@@ -1,0 +1,196 @@
+python - <<'PY'
+from services.uspto_search_service import search_patents
+from models.embedding_model import EmbeddingModel
+from services.embedding_service import embed_patents, embed_query
+import numpy as np
+
+print("\n=== STANDALONE SEMANTIC RETRIEVAL EXPERIMENT ===\n")
+
+# ------------------------------------------------------------
+# 1. Build an INDEPENDENT USPTO candidate corpus.
+#
+# IMPORTANT:
+# Do not use invention-specific terms here.
+# The purpose is to test whether semantic retrieval can
+# discover relevant patents that the Boolean invention search
+# would otherwise miss.
+# ------------------------------------------------------------
+independent_patents = {}
+
+for offset in range(0, 500, 100):
+    results = search_patents(
+        query="vehicle",
+        limit=100,
+        offset=offset,
+    )
+
+    print(
+        f"USPTO broad retrieval offset={offset}: "
+        f"{len(results)} patents"
+    )
+
+    for patent in results:
+        independent_patents[patent.patent_id] = patent
+
+print()
+print(
+    f"Independent USPTO candidate corpus: "
+    f"{len(independent_patents)} unique patents"
+)
+
+patents = list(independent_patents.values())
+
+if not patents:
+    raise SystemExit("No patents available for semantic experiment.")
+
+# ------------------------------------------------------------
+# 3. Semantic query
+# ------------------------------------------------------------
+semantic_query = (
+    "Autonomous vehicle lane detection using infrared sensors "
+    "or infrared cameras to identify lane markings and lane "
+    "boundaries for vehicle perception and control."
+)
+
+print("\nSemantic query:")
+print(semantic_query)
+
+# ------------------------------------------------------------
+# 4. Load the EXISTING embedding model
+# ------------------------------------------------------------
+print("\nLoading existing embedding model...")
+
+model = EmbeddingModel()
+
+# ------------------------------------------------------------
+# 5. Embed documents and query
+# ------------------------------------------------------------
+print("Embedding patent documents...")
+
+doc_vectors = embed_patents(patents, model)
+
+print("Embedding semantic query...")
+
+query_vector = embed_query(semantic_query, model)
+
+# ------------------------------------------------------------
+# 7. Cosine similarity
+#    Existing embeddings are normalized, so dot product =
+#    cosine similarity.
+# ------------------------------------------------------------
+scores = doc_vectors @ query_vector
+
+# ------------------------------------------------------------
+# 8. Rank
+# ------------------------------------------------------------
+order = np.argsort(scores)[::-1]
+ranked_patents = [patents[idx] for idx in order]
+scores = {
+    patent.patent_id: float(scores[idx])
+    for idx, patent in enumerate(patents)
+}
+
+print("\n" + "=" * 80)
+print("SEMANTIC RETRIEVAL RESULTS")
+print("=" * 80)
+
+top_k = min(20, len(order))
+
+for rank, patent in enumerate(ranked_patents[:top_k], start=1):
+
+    print(
+        f"\n{rank:02d}. "
+        f"{patent.patent_id} | "
+        f"{scores[patent.patent_id]:.4f} | "
+        f"{patent.patent_title}"
+    )
+
+    abstract = (patent.patent_abstract or "").replace("\n", " ").strip()
+
+    if abstract:
+        print(f"    {abstract[:300]}...")
+
+print("\n" + "=" * 80)
+print(f"Returned top {top_k} of {len(patents)} candidates")
+print("=" * 80)
+
+# ------------------------------------------------------------
+# 9. Build the current Boolean invention corpus for comparison.
+# ------------------------------------------------------------
+boolean_patents = {}
+
+for search_query in [
+    "lane detection",
+    "infrared sensor",
+    "infrared camera",
+    "lane marking",
+]:
+    results = search_patents(
+        query=search_query,
+        limit=25,
+        offset=0,
+    )
+
+    for patent in results:
+        boolean_patents[patent.patent_id] = patent
+
+boolean_ids = set(boolean_patents.keys())
+
+semantic_top20 = ranked_patents[:20]
+
+new_semantic = [
+    patent
+    for patent in semantic_top20
+    if patent.patent_id not in boolean_ids
+]
+
+overlap = [
+    patent
+    for patent in semantic_top20
+    if patent.patent_id in boolean_ids
+]
+
+print()
+print("=" * 80)
+print("SEMANTIC VS CURRENT BOOLEAN SEARCH")
+print("=" * 80)
+
+print(
+    f"Independent semantic corpus:   {len(independent_patents)}"
+)
+
+print(
+    f"Current Boolean corpus:        {len(boolean_ids)}"
+)
+
+print(
+    f"Semantic top 20:               {len(semantic_top20)}"
+)
+
+print(
+    f"Already in Boolean corpus:     {len(overlap)}"
+)
+
+print(
+    f"New semantic candidates:       {len(new_semantic)}"
+)
+
+print()
+print("NEW SEMANTIC CANDIDATES")
+print("-" * 80)
+
+for i, patent in enumerate(new_semantic, 1):
+    print(
+        f"{i:02d}. "
+        f"{patent.patent_id} | "
+        f"{scores[patent.patent_id]:.4f} | "
+        f"{patent.patent_title}"
+    )
+
+    abstract = (
+        patent.patent_abstract or ""
+    ).replace("\n", " ").strip()
+
+    if abstract:
+        print(f"    {abstract[:300]}...")
+PY

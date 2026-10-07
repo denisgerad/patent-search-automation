@@ -50,6 +50,7 @@ from services.classification_refinement_service import (
 )
 from services.search_strategy_service import (
     build_boolean_search,
+    build_core_pair_queries,
     build_uspto_search_strings,
     build_uspto_proximity_strings,
 )
@@ -194,8 +195,9 @@ st.caption(
 # ── AI-assisted concept generation ────────────────────────────────────────────
 st.markdown("### 🤖 AI-Assisted Search Concepts")
 st.caption(
-    "Claude can propose 10 technical concepts and 3 patent-search keywords "
-    "for each. Review and edit the suggestions before using them in the search strategy."
+    "Claude can propose 10 technical concepts with a primary patent search "
+    "term and two alternative terms for each. Review and edit the suggestions "
+    "before using them in the search strategy."
 )
 
 if "ai_search_concepts" not in st.session_state:
@@ -252,28 +254,45 @@ if _ai_concepts:
             key=f"ai_concept_name_{index}",
         )
 
-        keywords = concept.get("keywords", [])
-        edited_keywords = []
+        primary_term = concept.get("primary_term", "")
+        alternative_terms = concept.get("alternative_terms", [])
 
-        for keyword_index in range(3):
-            default_keyword = (
-                keywords[keyword_index]
-                if keyword_index < len(keywords)
+        edited_primary_term = st.text_input(
+            "Primary search term",
+            value=primary_term,
+            key=f"ai_concept_{index}_primary_term",
+        )
+
+        edited_alternative_terms = []
+
+        for alternative_index in range(2):
+            default_alternative = (
+                alternative_terms[alternative_index]
+                if alternative_index < len(alternative_terms)
                 else ""
             )
 
-            edited_keyword = st.text_input(
-                f"Keyword {keyword_index + 1}",
-                value=default_keyword,
-                key=f"ai_concept_{index}_keyword_{keyword_index + 1}",
+            edited_alternative = st.text_input(
+                f"Alternative search term {alternative_index + 1}",
+                value=default_alternative,
+                key=f"ai_concept_{index}_alternative_{alternative_index + 1}",
             )
 
-            edited_keywords.append(edited_keyword)
+            edited_alternative_terms.append(edited_alternative)
+
+        importance = st.selectbox(
+            "Importance",
+            ["critical", "important", "supporting"],
+            index=1,
+            key=f"ai_concept_{index}_importance",
+        )
 
         edited_concepts.append(
             {
                 "name": concept_name,
-                "keywords": edited_keywords,
+                "primary_term": edited_primary_term,
+                "alternative_terms": edited_alternative_terms,
+                "importance": importance,
             }
         )
 
@@ -296,16 +315,31 @@ if _ai_concepts:
                 _concept.get("name", "").strip()
             )
 
+            _primary_term = str(
+                _concept.get("primary_term", "")
+            ).strip()
+
+            _alternative_terms = [
+                str(term).strip()
+                for term in _concept.get("alternative_terms", [])
+                if str(term).strip()
+            ]
+
+            _search_terms = []
+
+            if _primary_term:
+                _search_terms.append(_primary_term)
+
+            _search_terms.extend(_alternative_terms)
+
             st.session_state[f"strategy_concept_terms_{_index}"] = "\n".join(
-                keyword.strip()
-                for keyword in _concept.get("keywords", [])
-                if keyword.strip()
+                _search_terms
             )
 
-            # Let the user decide importance in the existing UI.
-            st.session_state[f"strategy_concept_importance_{_index}"] = "important"
+            st.session_state[f"strategy_concept_importance_{_index}"] = (
+                _concept.get("importance", "important")
+            )
 
-            # Claude's three keywords are alternatives by default.
             st.session_state[f"strategy_concept_operator_{_index}"] = "OR"
 
         st.success(
@@ -1224,22 +1258,39 @@ def _run_search(queries: list[str]) -> tuple[list, list]:
         and backend == "uspto"
         and settings.patentsview_api_key
     ):
-        from services.search_strategy_service import build_boolean_search
+        from services.search_strategy_service import build_core_pair_queries
         from services.uspto_search_service import search_patents_by_strategy
 
         strategy = st.session_state.search_strategy
-        strategy_query = build_boolean_search(strategy)
+        strategy_queries = build_core_pair_queries(strategy)
 
-        if strategy_query:
-            raw = search_patents_by_strategy(
+        raw = []
+
+        for strategy_query in strategy_queries:
+            if not strategy_query:
+                continue
+
+            logger.info(
+                "USPTO strategy search — query: %s",
+                strategy_query,
+            )
+
+            results = search_patents_by_strategy(
                 query=strategy_query,
                 limit=100,
                 offset=0,
             )
-        else:
-            raw = []
+
+            raw.extend(results)
 
         unique = deduplicate(raw)
+
+        logger.info(
+            "USPTO strategy search — %d raw, %d unique patents",
+            len(raw),
+            len(unique),
+        )
+
         return raw, unique
 
     if backend == "epo" and settings.epo_consumer_key:

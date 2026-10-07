@@ -15,11 +15,61 @@ def _format_term(term: str) -> str:
 
 
 def build_boolean_search(strategy: SearchStrategy) -> str:
-    """Build a Boolean expression from a manual SearchStrategy."""
+    """Build pairwise Boolean retrieval queries from critical concepts."""
+
+    critical_concepts = [
+        concept
+        for concept in strategy.concepts
+        if concept.importance.lower() == "critical"
+        and any(term.strip() for term in concept.terms)
+    ]
+
+    if len(critical_concepts) < 2:
+        return ""
 
     concept_expressions = []
 
-    for concept in strategy.concepts:
+    for concept in critical_concepts:
+        terms = [
+            _format_term(term)
+            for term in concept.terms
+            if term.strip()
+        ]
+
+        if len(terms) == 1:
+            expression = terms[0]
+        else:
+            expression = f"({' OR '.join(terms)})"
+
+        concept_expressions.append(expression)
+
+    pairwise_queries = []
+
+    for i in range(len(concept_expressions)):
+        for j in range(i + 1, len(concept_expressions)):
+            pairwise_queries.append(
+                f"{concept_expressions[i]} AND {concept_expressions[j]}"
+            )
+
+    return "\n".join(pairwise_queries)
+
+
+def build_search_queries(strategy: SearchStrategy) -> list[str]:
+    """Build multiple retrieval-oriented queries from critical concepts."""
+
+    critical_concepts = [
+        concept
+        for concept in strategy.concepts
+        if concept.importance.lower() == "critical"
+        and concept.terms
+    ]
+
+    if not critical_concepts:
+        return []
+
+    queries: list[str] = []
+
+    for concept in critical_concepts:
         terms = [
             _format_term(term)
             for term in concept.terms
@@ -29,29 +79,71 @@ def build_boolean_search(strategy: SearchStrategy) -> str:
         if not terms:
             continue
 
-        expression = f" {concept.operator} ".join(terms)
+        if len(terms) == 1:
+            expression = terms[0]
+        else:
+            expression = f"({' OR '.join(terms)})"
 
-        if len(terms) > 1:
-            expression = f"({expression})"
+        queries.append(expression)
+
+    return queries
+
+
+def build_core_pair_queries(strategy: SearchStrategy) -> list[str]:
+    """Build pairwise queries from critical concepts.
+
+    Each concept uses OR internally, while different concepts
+    are combined with AND.
+    """
+
+    critical_concepts = [
+        concept
+        for concept in strategy.concepts
+        if concept.importance.lower() == "critical"
+        and any(term.strip() for term in concept.terms)
+    ]
+
+    if len(critical_concepts) < 2:
+        return []
+
+    concept_expressions: list[str] = []
+
+    for concept in critical_concepts:
+        terms = [
+            _format_term(term)
+            for term in concept.terms
+            if term.strip()
+        ]
+
+        if not terms:
+            continue
+
+        if len(terms) == 1:
+            expression = terms[0]
+        else:
+            expression = f"({' OR '.join(terms)})"
 
         concept_expressions.append(expression)
 
-    if not concept_expressions:
-        return ""
+    pairwise_queries: list[str] = []
 
-    return f" {strategy.concept_operator} ".join(
-        concept_expressions
-    )
+    for i in range(len(concept_expressions)):
+        for j in range(i + 1, len(concept_expressions)):
+            pairwise_queries.append(
+                f"{concept_expressions[i]} AND "
+                f"{concept_expressions[j]}"
+            )
+
+    return pairwise_queries
 
 
 def build_uspto_search_strings(strategy: SearchStrategy) -> dict[str, str]:
     """
-    Build field-specific USPTO Patent Public Search expressions.
+    Build field-specific USPTO Patent Public Search expressions
+    from critical concepts only.
 
-    Returns one search expression per selected field:
-    title    -> .TI.
-    abstract -> .AB.
-    claims   -> .CLM.
+    The displayed expressions should match the concepts used by
+    the approved retrieval strategy.
     """
 
     field_codes = {
@@ -59,6 +151,13 @@ def build_uspto_search_strings(strategy: SearchStrategy) -> dict[str, str]:
         "abstract": ".AB.",
         "claims": ".CLM.",
     }
+
+    critical_concepts = [
+        concept
+        for concept in strategy.concepts
+        if concept.importance.lower() == "critical"
+        and any(term.strip() for term in concept.terms)
+    ]
 
     results = {}
 
@@ -70,7 +169,7 @@ def build_uspto_search_strings(strategy: SearchStrategy) -> dict[str, str]:
 
         concept_expressions = []
 
-        for concept in strategy.concepts:
+        for concept in critical_concepts:
             terms = [
                 _format_term(term)
                 for term in concept.terms
@@ -85,7 +184,6 @@ def build_uspto_search_strings(strategy: SearchStrategy) -> dict[str, str]:
             if len(terms) > 1:
                 expression = f"({expression})"
 
-            # Apply the USPTO field restriction to this concept.
             expression = f"{expression}{field_code}"
 
             concept_expressions.append(expression)

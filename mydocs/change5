@@ -1,0 +1,251 @@
+1. models/schemas.py — one small fix
+Your current model already has:
+continuity_family_id: Optional[str] = None
+
+
+So leave that as-is.
+I would, however, fix this:
+concept_hits: dict = {}
+
+
+to:
+concept_hits: dict = Field(default_factory=dict)
+
+
+So the final part becomes:
+class RankedPatent(BaseModel):    """A patent with its hybrid-ranking scores attached."""    patent: PatentRecord    cosine_score: float    bm25_score: float    hybrid_score: float    coverage: float = 0.0    concept_hits: dict = Field(default_factory=dict)
+
+
+That's a general Pydantic correctness improvement, not specifically required for family deduplication.
+2. uspto_search_service.py — important check
+Your normal USPTO search already does the right thing:
+patent = _build_patent_record(raw)if patent is not None:    records.append(patent)
+
+
+and _build_patent_record() populates:
+continuity_family_id=continuity_family_id,
+
+
+So the normal search path is good.    Pasted markdown(2)
+But there is one bug in search_patents_by_strategy()
+Currently you have:
+return [    _build_patent_record(raw)    for raw in raw_records]
+
+
+The problem is that _build_patent_record() returns:
+PatentRecord | None
+
+
+So this can produce:
+[PatentRecord, PatentRecord, None, PatentRecord, ...]
+
+Change it to:
+records: list[PatentRecord] = []for raw in raw_records:    if not isinstance(raw, dict):        continue    patent = _build_patent_record(raw)    if patent is not None:        records.append(patent)return records
+
+
+This is particularly important because your AI Invention Structure search and manual Search Strategy search both use search_patents_by_strategy(). Your current code confirms that path.    Pasted markdown(2)
+3. streamlit_app.py — update the metrics
+This is the main UI change I recommend.
+Currently you calculate:
+raw_count = len(st.session_state.raw_patents)unique_count = len(st.session_state.unique_patents)dupes = raw_count - unique_count
+
+
+and display:
+Raw fetched
+After dedup
+Duplicates removed
+
+That no longer tells the full story because After dedup now means representative patents/families, not merely unique publication IDs.    Pasted text(20261007-105535)
+I recommend showing:
+Raw publications       49
+Unique publications    43
+Unique families        31
+Family duplicates      12
+
+However
+Your current deduplicate() returns only the final representatives. Therefore the UI cannot calculate:
+unique_publicationsunique_familiesfamily_duplicates
+
+
+unless dedup_service.py exposes those metrics.
+So I recommend adding a small result/metrics mechanism rather than trying to reconstruct it in Streamlit.
+4. Best approach: make dedup return metrics
+I would not change the public call everywhere from:
+unique = deduplicate(raw)
+
+
+to a complicated object yet.
+Keep:
+unique = deduplicate(raw)
+
+
+for compatibility.
+Instead, add:
+def get_last_dedup_stats() -> dict:    ...
+
+
+or, even better, make the service calculate a DedupStats model later.
+For now, the simple version is enough.
+For example:
+_last_stats = {    "raw": 0,    "unique_publications": 0,    "unique_families": 0,    "publication_duplicates": 0,    "family_duplicates": 0,}
+
+
+Then inside deduplicate() update it.
+But there is an even cleaner approach if you're happy to make a small API change:
+@dataclassclass DedupResult:    patents: list[PatentRecord]    raw_count: int    unique_publications: int    unique_families: int    publication_duplicates: int    family_duplicates: int
+
+
+I would prefer this architecture, but it means updating the callers.
+For your current project, I would keep the existing API for now and add metrics separately.
+5. streamlit_app.py — update _run_search()
+The good news is that you already have the correct placement.
+You currently do:
+raw = ...unique = deduplicate(raw)return raw, unique
+
+
+That's exactly what we want.
+For example, your AI search path has:
+raw.extend(results)unique = deduplicate(raw)return raw, unique
+
+
+and the manual strategy path does the same.    Pasted text(20261007-105535)
+So don't move deduplication.
+The architecture should remain:
+USPTO
+   ↓
+PatentRecord[]
+   ↓
+deduplicate()
+   ↓
+representative PatentRecord[]
+   ↓
+embedding
+   ↓
+ranking
+
+That is the correct place to do it.
+6. Classification refinement is already okay
+Your classification refinement currently does:
+current_patents = st.session_state.get(    "unique_patents",    [],)
+
+
+That's correct.
+It means classification refinement operates on the family-deduplicated result set, which is what we want.
+And when you rerun the original search with classifications:
+unique_classified = deduplicate(raw_classified)st.session_state.raw_patents = raw_classifiedst.session_state.unique_patents = unique_classified
+
+
+That's also correct.    Pasted text(20261007-105535)
+So no change is required there.
+7. patent_pipeline.py — no structural change required
+Your pipeline already does:
+raw_patents = _execute_tiered_search(    query,    validated_queries,    tokens,)patents = dedup_service.deduplicate(raw_patents)
+
+
+before:
+doc_vecs = embedding_service.embed_patents(    patents,    embed_model,)
+
+
+That is exactly where family deduplication should happen.    code
+So the pipeline remains:
+Stage 1     Query expansion
+Stage 1b    Validation
+Stage 2     USPTO search
+Stage 3     Publication + family dedup       ← changed
+Stage 4     Embedding
+Stage 5     Hybrid ranking
+Stage 6     Claude comparison
+Stage 7     Report
+Stage 8     Persistence
+
+Don't add another deduplication stage later.
+8. One thing I would add to the results table
+Since family deduplication is now meaningful, I recommend adding the family ID to the Streamlit table.
+Currently you have:
+rows = [    {        "patent_id": p.patent_id,        "title": ...,        "type": ...,        "date": ...,    }]
+
+
+Change to:
+rows = [    {        "patent_id": p.patent_id,        "family_id": p.continuity_family_id or "—",        "title": "\n".join(            textwrap.wrap(                p.patent_title or "",                width=80,            )        ),        "type": p.patent_type or "—",        "date": p.patent_date or "—",    }    for p in st.session_state.unique_patents]
+
+
+This gives you visibility that the deduplication is actually working.
+9. More importantly: don't lose the family members
+This is the one architectural improvement I strongly recommend before you consider this feature finished.
+Suppose USPTO returns:
+US-A
+US-B
+US-C
+US-D
+
+and:
+US-A ─┐
+US-B ─┤
+US-C ─┤── Family F123
+US-D ─┘
+
+Your ranking pipeline should only see:
+Family F123 → US-A
+
+or whichever representative your selection logic chooses.
+But the UI/report should ideally be able to say:
+Patent family: F123
+Representative: US-A
+Other family members: US-B, US-C, US-D
+
+Otherwise you've thrown away useful patent information.
+I would therefore eventually add:
+family_members: dict[str, list[PatentRecord]]
+
+
+to the deduplication result/metadata.
+But I would not implement this yet if your immediate goal is simply getting family-aware dedup working. Get the core pipeline validated first.
+10. One important caveat with your current USPTO family logic
+Your current function is:
+_get_continuity_family_id(raw)
+
+
+and it examines:
+parentContinuityBag
+
+
+and chooses the earliest parent from that bag as the family root. Your code explicitly comments that the earliest parent is the family root.    Pasted markdown(2)
+That is good if the ODP response gives you the complete continuity ancestry.
+But consider:
+Application A
+     ↓
+Application B
+     ↓
+Application C
+
+If C only reports:
+C → B
+
+and doesn't expose:
+B → A
+
+then C gets:
+family_id = B
+
+instead of:
+family_id = A
+
+That would cause incomplete family deduplication.
+So after the code changes, this is the next thing I would test against real USPTO data.
+Your change list
+So I would make the changes in this order:
+File	Change	Priority
+services/dedup_service.py	Publication + continuity-family dedup	✅ Already done
+models/schemas.py	Fix concept_hits default	🟢 Small
+services/uspto_search_service.py	Filter None in search_patents_by_strategy()	🔴 Important
+streamlit_app.py	Add family_id to results table	🟢 Recommended
+streamlit_app.py	Improve dedup metrics	🟢 Recommended
+orchestrator/patent_pipeline.py	No structural change	✅ Already correct
+Classification refinement	No change	✅ Already correct
+Family-member storage	Add later	🟡 Phase 2
+Multi-level continuity resolution	Test/verify with USPTO	🔴 Important
+
+
+Therefore, you do not need to redesign the whole application.
+The immediate next coding step I would do is:
+1. Fix search_patents_by_strategy() → 2. update the Streamlit results/metrics → 3. run a real search and inspect whether multiple publications from the same continuity family collapse to one representative.

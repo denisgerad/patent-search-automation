@@ -1800,10 +1800,16 @@ with tab_search:
         st.divider()
         rows = [
             {
-                "patent_id":    p.patent_id,
-                "title":        "\n".join(textwrap.wrap(p.patent_title or "", width=80)),
-                "type":         p.patent_type or "—",
-                "date":         p.patent_date  or "—",
+                "patent_id": p.patent_id,
+                "family_id": p.continuity_family_id or "—",
+                "title": "\n".join(
+                    textwrap.wrap(
+                        p.patent_title or "",
+                        width=80,
+                    )
+                ),
+                "type": p.patent_type or "—",
+                "date": p.patent_date or "—",
             }
             for p in st.session_state.unique_patents
         ]

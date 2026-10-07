@@ -555,10 +555,18 @@ def search_patents_by_strategy(
 
     raw_records = data.get("patentFileWrapperDataBag", [])
 
-    return [
-        _build_patent_record(raw)
-        for raw in raw_records
-    ]
+    records: list[PatentRecord] = []
+
+    for raw in raw_records:
+        if not isinstance(raw, dict):
+            continue
+
+        patent = _build_patent_record(raw)
+
+        if patent is not None:
+            records.append(patent)
+
+    return records
 
 
 def search_patents_with_classification(

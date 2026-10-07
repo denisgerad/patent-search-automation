@@ -89,7 +89,7 @@ class RankedPatent(BaseModel):
     bm25_score: float
     hybrid_score: float
     coverage: float = 0.0
-    concept_hits: dict = {}
+    concept_hits: dict = Field(default_factory=dict)
 
 
 class PipelineResult(BaseModel):

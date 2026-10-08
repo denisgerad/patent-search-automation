@@ -50,7 +50,7 @@ from services.classification_refinement_service import (
 )
 from services.search_strategy_service import (
     build_boolean_search,
-    build_core_pair_queries,
+    build_search_queries,
     build_uspto_search_strings,
     build_uspto_proximity_strings,
 )
@@ -379,7 +379,19 @@ if _invention_for_structure:
                     ClaudeClient(),
                 )
 
+            _debug_search_paths = _structure.get("search_paths", [])
+            if _debug_search_paths:
+                st.write(
+                    "DEBUG SEARCH PATHS:",
+                    [path.get("name") for path in _debug_search_paths],
+                )
+                st.json(_debug_search_paths)
+
             st.session_state.ai_invention_structure = _structure
+            logger.info(
+                "AI INVENTION STRUCTURE:\n%s",
+                json.dumps(_structure, indent=2, ensure_ascii=False),
+            )
             st.session_state.ai_search_path_generation = (
                 st.session_state.get("ai_search_path_generation", 0) + 1
             )
@@ -477,6 +489,15 @@ if _structure:
             )
         )
 
+        logger.info(
+            "GENERATED SEARCH PATHS:\n%s",
+            json.dumps(
+                _updated_structure["search_paths"],
+                indent=2,
+                ensure_ascii=False,
+            ),
+        )
+
         st.session_state.ai_invention_structure = (
             _updated_structure
         )
@@ -502,6 +523,9 @@ if _structure:
             )
 
         st.rerun()
+
+    with st.expander("Debug: Generated Search Paths"):
+        st.json(_structure.get("search_paths", []))
 
     st.markdown("#### Generated Search Paths")
 
@@ -648,6 +672,10 @@ if _structure:
                 _path["expression"],
                 language="text",
             )
+
+    if _structure:
+        with st.expander("Debug: AI Invention Structure"):
+            st.json(_structure)
 
 with st.expander("Build Search Strategy", expanded=True):
 
@@ -1278,16 +1306,34 @@ def _run_search(queries: list[str]) -> tuple[list, list]:
             path_name = path.get("name", "Unnamed path")
 
             logger.info(
-                "AI PATH QUERY [%s]: %s",
+                "USPTO STRATEGY SEARCH | path=%s | query=%s",
                 path_name,
                 expression,
             )
 
+            limit = path.get("limit", 100)
             results = search_patents_by_strategy(
                 query=expression,
-                limit=100,
+                limit=limit,
                 offset=0,
             )
+
+            logger.info(
+                "SEARCH RESULT | path=%s | count=%d",
+                path_name,
+                len(results),
+            )
+
+            if path_name in {
+                "Core + Function",
+                "Core + Sensor",
+                "Core + Function + Sensor",
+            } and not results:
+                logger.warning(
+                    "ZERO CORE RESULTS | path=%s | query=%s",
+                    path_name,
+                    expression,
+                )
 
             path_results.append(
                 {
@@ -1341,6 +1387,15 @@ def _run_search(queries: list[str]) -> tuple[list, list]:
         st.session_state.ai_search_path_provenance = path_provenance
 
         unique = deduplicate(raw)
+        from collections import Counter
+        path_counter = Counter()
+        for patent in unique:
+            for path in getattr(patent, "search_paths", []):
+                path_counter[path] += 1
+        logger.info(
+            "UNIQUE CONTRIBUTION BY SEARCH PATH: %s",
+            dict(path_counter),
+        )
         return raw, unique
 
     # Approved manual Search Strategy
@@ -1350,11 +1405,11 @@ def _run_search(queries: list[str]) -> tuple[list, list]:
         and backend == "uspto"
         and settings.patentsview_api_key
     ):
-        from services.search_strategy_service import build_core_pair_queries
+        from services.search_strategy_service import build_search_queries
         from services.uspto_search_service import search_patents_by_strategy
 
         strategy = st.session_state.search_strategy
-        strategy_queries = build_core_pair_queries(strategy)
+        strategy_queries = build_search_queries(strategy)
 
         raw = []
 
@@ -1363,7 +1418,8 @@ def _run_search(queries: list[str]) -> tuple[list, list]:
                 continue
 
             logger.info(
-                "USPTO strategy search — query: %s",
+                "USPTO STRATEGY SEARCH | path=%s | query=%s",
+                "Manual Search Strategy",
                 strategy_query,
             )
 
@@ -1373,9 +1429,37 @@ def _run_search(queries: list[str]) -> tuple[list, list]:
                 offset=0,
             )
 
+            logger.info(
+                "SEARCH RESULT | path=%s | count=%d",
+                "Manual Search Strategy",
+                len(results),
+            )
+
+            for patent in results:
+                if patent is None:
+                    continue
+
+                path_name = "Manual Search Strategy"
+                existing_paths = list(
+                    getattr(patent, "search_paths", []) or []
+                )
+
+                if path_name not in existing_paths:
+                    patent.search_paths = existing_paths + [path_name]
+
             raw.extend(results)
 
         unique = deduplicate(raw)
+
+        from collections import Counter
+        path_counter = Counter()
+        for patent in unique:
+            for path in getattr(patent, "search_paths", []):
+                path_counter[path] += 1
+        logger.info(
+            "UNIQUE CONTRIBUTION BY SEARCH PATH: %s",
+            dict(path_counter),
+        )
 
         logger.info(
             "USPTO strategy search — %d raw, %d unique patents",
@@ -1932,6 +2016,25 @@ with tab_search:
                 use_container_width=True,
                 hide_index=True,
             )
+
+            core_paths = {
+                "Core + Function",
+                "Core + Sensor",
+                "Core + Function + Sensor",
+            }
+            core_results = sum(
+                result["count"]
+                for result in _path_results
+                if result.get("name") in core_paths
+            )
+
+            if core_results == 0:
+                st.warning(
+                    "No patents were retrieved from Core-based search paths. "
+                    "The current candidate set is therefore dominated by "
+                    "sensor/function terminology. Review the Core System "
+                    "decomposition before relying on ranking results."
+                )
 
         st.divider()
         rows = [
@@ -3072,6 +3175,7 @@ with tab_rank:
                     )
                     or "—"
                 ),
+                "Search Paths": ", ".join(rp.search_paths) if rp.search_paths else "—",
             })
 
         df = pd.DataFrame(rows)

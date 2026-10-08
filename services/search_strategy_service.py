@@ -1,4 +1,8 @@
+import logging
+
 from models.schemas import SearchStrategy
+
+logger = logging.getLogger(__name__)
 
 
 def _format_term(term: str) -> str:
@@ -14,8 +18,296 @@ def _format_term(term: str) -> str:
     return term
 
 
+def _has_expression(value: str | None) -> bool:
+    return bool(value and value.strip())
+
+
+def _combine_roles(*expressions: str) -> str:
+    """Combine non-empty role expressions using AND."""
+
+    parts = [
+        expression.strip()
+        for expression in expressions
+        if _has_expression(expression)
+    ]
+
+    return " AND ".join(
+        f"({part})"
+        for part in parts
+    )
+
+
+def _build_role_expression(terms: list[str]) -> str:
+    """Build an OR expression for one search role."""
+
+    cleaned = [
+        _format_term(str(term).strip())
+        for term in terms
+        if str(term).strip()
+    ]
+
+    if not cleaned:
+        return ""
+
+    if len(cleaned) == 1:
+        return cleaned[0]
+
+    return f"({' OR '.join(cleaned)})"
+
+
+def _build_role_variants(terms: list[str]) -> list[str]:
+    """Build a deterministic, bounded set of search-role variants.
+
+    The original terminology is retained. This only adds useful
+    phrase/individual-token variants and does not invent synonyms.
+    """
+    variants: list[str] = []
+
+    for raw_term in terms:
+        term = str(raw_term).strip()
+
+        if not term:
+            continue
+
+        if term not in variants:
+            variants.append(term)
+
+        words = [
+            word.strip()
+            for word in term.split()
+            if word.strip()
+        ]
+
+        if len(words) > 1:
+            for word in words:
+                if len(word) >= 4 and word not in variants:
+                    variants.append(word)
+
+    return variants
+
+
+def validate_core_terms(terms: list[str]) -> list[str]:
+    """Keep core terms suitable for lexical patent search.
+
+    Reject only obvious generic stand-alone terms that are not likely to
+    describe the invention identity. Preserve distinctive arrangements that
+    include generic technology as part of a more specific phrase.
+    """
+    generic_terms = {
+        "camera",
+        "sensor",
+        "processor",
+        "computer",
+        "artificial intelligence",
+        "ai",
+        "machine learning",
+        "image processing",
+        "facial recognition",
+        "face detection",
+    }
+
+    validated: list[str] = []
+    for term in terms:
+        cleaned = str(term).strip()
+        if not cleaned:
+            continue
+        if cleaned.lower() in generic_terms:
+            continue
+        validated.append(cleaned)
+
+    return validated
+
+
+def _build_core_search_expression(core_terms: list[str]) -> str:
+    """Build a core-only recall expression from the original core terms."""
+
+    terms = validate_core_terms(core_terms)
+
+    if not terms:
+        return ""
+
+    return " OR ".join(
+        f'"{term}"' if " " in term else term
+        for term in terms
+    )
+
+
+def build_search_paths_from_structure(
+    structure: dict,
+) -> list[dict]:
+    """
+    Build deterministic patent search paths from the AI invention
+    structure.
+
+    Core paths represent invention identity.
+    Sensor/function paths provide implementation-level recall.
+    """
+
+    core_expr = _build_role_expression(
+        validate_core_terms(structure.get("core_system", []))
+    )
+
+    sensor_expr = _build_role_expression(
+        structure.get("sensors", [])
+    )
+
+    function_expr = _build_role_expression(
+        structure.get("functions", [])
+    )
+
+    object_expr = _build_role_expression(
+        structure.get("objects", [])
+    )
+
+    logger.info(
+        "SEARCH ROLE EXPRESSIONS | "
+        "core=%r | sensor=%r | function=%r | object=%r",
+        core_expr,
+        sensor_expr,
+        function_expr,
+        object_expr,
+    )
+
+    paths: list[dict] = []
+
+    # =========================================================
+    # TIER A — INVENTION IDENTITY
+    # =========================================================
+
+    if core_expr:
+        paths.append({
+            "name": "Core Only",
+            "expression": core_expr,
+            "quality_level": "recall",
+            "recall_priority": "very_high",
+            "precision_priority": "medium",
+            "limit": 25,
+        })
+
+    expression = _combine_roles(
+        core_expr,
+        function_expr,
+    )
+
+    if expression:
+        paths.append({
+            "name": "Core + Function",
+            "expression": expression,
+            "quality_level": "broad",
+            "recall_priority": "high",
+            "precision_priority": "medium",
+            "limit": 100,
+        })
+
+    expression = _combine_roles(
+        core_expr,
+        sensor_expr,
+    )
+
+    if expression:
+        paths.append({
+            "name": "Core + Sensor",
+            "expression": expression,
+            "quality_level": "balanced",
+            "recall_priority": "medium",
+            "precision_priority": "high",
+            "limit": 100,
+        })
+
+    expression = _combine_roles(
+        core_expr,
+        function_expr,
+        sensor_expr,
+    )
+
+    if expression:
+        paths.append({
+            "name": "Core + Function + Sensor",
+            "expression": expression,
+            "quality_level": "focused",
+            "recall_priority": "low",
+            "precision_priority": "high",
+            "limit": 100,
+        })
+
+    # =========================================================
+    # TIER B — IMPLEMENTATION DISCOVERY
+    # =========================================================
+
+    expression = _combine_roles(
+        sensor_expr,
+        function_expr,
+    )
+
+    if expression:
+        paths.append({
+            "name": "Sensor + Function",
+            "expression": expression,
+            "quality_level": "broad",
+            "recall_priority": "high",
+            "precision_priority": "medium",
+            "limit": 100,
+        })
+
+    expression = _combine_roles(
+        sensor_expr,
+        object_expr,
+        function_expr,
+    )
+
+    if expression:
+        paths.append({
+            "name": "Sensor + Object + Function",
+            "expression": expression,
+            "quality_level": "focused",
+            "recall_priority": "medium",
+            "precision_priority": "high",
+            "limit": 100,
+        })
+
+    logger.info(
+        "GENERATED SEARCH PATHS: %s",
+        [path["name"] for path in paths],
+    )
+
+    return paths
+
+
+def _field_expression(term_expression: str, fields: list[str]) -> str:
+    """Expand one concept expression across the selected USPTO fields.
+
+    Example:
+        ("fraud score" OR "risk score")
+    becomes:
+        (("fraud score" OR "risk score").TI. OR ("fraud score" OR "risk score").AB. OR ("fraud score" OR "risk score").CLM.)
+    """
+    field_map = {
+        "title": "TI",
+        "abstract": "AB",
+        "claims": "CLM",
+    }
+
+    expressions = []
+    normalized = term_expression.strip()
+
+    for field in fields:
+        code = field_map.get(str(field).lower())
+        if not code:
+            continue
+
+        if normalized.startswith("(") and normalized.endswith(")"):
+            expressions.append(f"{normalized}.{code}.")
+        else:
+            expressions.append(f"({normalized}).{code}.")
+
+    if not expressions:
+        return ""
+
+    return "(" + " OR ".join(expressions) + ")"
+
+
 def build_boolean_search(strategy: SearchStrategy) -> str:
-    """Build pairwise Boolean retrieval queries from critical concepts."""
+    """Build a field-aware Boolean search from critical concepts."""
 
     critical_concepts = [
         concept
@@ -31,27 +323,41 @@ def build_boolean_search(strategy: SearchStrategy) -> str:
 
     for concept in critical_concepts:
         terms = [
-            _format_term(term)
-            for term in concept.terms
-            if term.strip()
+            term.strip()
+            for term in getattr(concept, "terms", [])
+            if str(term).strip()
         ]
 
-        if len(terms) == 1:
-            expression = terms[0]
-        else:
-            expression = f"({' OR '.join(terms)})"
+        if not terms:
+            continue
 
-        concept_expressions.append(expression)
+        operator = str(getattr(concept, "operator", "OR")).upper()
+        if operator not in {"AND", "OR"}:
+            operator = "OR"
 
-    pairwise_queries = []
+        expression = f" {operator} ".join(
+            _format_term(term) for term in terms
+        )
 
-    for i in range(len(concept_expressions)):
-        for j in range(i + 1, len(concept_expressions)):
-            pairwise_queries.append(
-                f"{concept_expressions[i]} AND {concept_expressions[j]}"
-            )
+        if len(terms) > 1:
+            expression = f"({expression})"
 
-    return "\n".join(pairwise_queries)
+        concept_expressions.append(
+            _field_expression(expression, strategy.search_fields)
+        )
+
+    if not concept_expressions:
+        return ""
+
+    boolean_query = " AND ".join(
+        expression for expression in concept_expressions if expression
+    )
+
+    print("\n===== GENERATED BOOLEAN SEARCH =====")
+    print(boolean_query)
+    print("====================================\n")
+
+    return boolean_query
 
 
 def build_search_queries(strategy: SearchStrategy) -> list[str]:

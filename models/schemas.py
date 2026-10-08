@@ -91,6 +91,7 @@ class RankedPatent(BaseModel):
     hybrid_score: float
     coverage: float = 0.0
     concept_hits: dict = Field(default_factory=dict)
+    search_paths: list[str] = Field(default_factory=list)
 
     # Importance-aware relevance
     importance_score: float = 0.0

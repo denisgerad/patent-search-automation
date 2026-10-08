@@ -1,0 +1,253 @@
+The next change should be to Core terminology generation
+We should not add more search paths now.
+We need to make the AI generate Core concepts that are simultaneously:
+1. technically distinctive,
+2. likely to appear in patent documents,
+3. searchable as individual phrases.
+The current Core concepts are evidently failing #2/#3.
+Change the AI prompt
+Find the section defining core_system and replace/strengthen it with:
+CORE SYSTEM — PATENT SEARCH TERMINOLOGY
+
+The core_system is the most important part of the invention
+decomposition.
+
+It must identify the technical system, apparatus, subsystem,
+architecture, or component arrangement that represents the invention.
+
+However, the terminology must also be suitable for patent searching.
+
+For each core system concept, provide terminology that is likely to
+appear in patent claims, abstracts, titles, or descriptions.
+
+DO NOT use abstract or marketing language.
+
+DO NOT use generic enabling technologies unless they are themselves
+the invention.
+
+Avoid standalone terms such as:
+
+- camera
+- sensor
+- processor
+- computer
+- AI
+- artificial intelligence
+- machine learning
+- image processing
+- facial recognition
+- face detection
+
+unless one of these is genuinely the inventive subject.
+
+Instead identify the technical combination or arrangement.
+
+For example, prefer terminology of the form:
+
+"[distinctive component] + [technical relationship] +
+[technical operation]"
+
+rather than a generic technology name.
+
+The core terminology should satisfy this test:
+
+"If I searched this phrase by itself in a patent database,
+would I reasonably expect to retrieve patents describing this
+specific technical invention or a closely related invention?"
+
+If the answer is no, make the terminology more technically specific.
+
+IMPORTANT:
+
+Generate between 2 and 5 core concepts.
+
+Each concept should be independently searchable.
+
+For each concept, provide:
+
+- a concise technical phrase
+- important patent terminology/synonyms
+- the distinctive technical relationship
+
+Do not combine every invention detail into one extremely long phrase.
+
+Do not use natural-language sentences as search terms.
+
+More importantly: separate "core concept" from "search terms"
+I recommend changing your schema slightly.
+Instead of:
+{
+  "core_system": [
+    "..."
+  ]
+}
+
+use:
+{
+  "core_system": [
+    {
+      "concept": "...",
+      "keywords": [
+        "...",
+        "...",
+        "..."
+      ]
+    }
+  ]
+}
+
+For example:
+{
+  "core_system": [
+    {
+      "concept": "multi-camera facial authentication with coordinated illumination",
+      "keywords": [
+        "multi-camera authentication",
+        "coordinated illumination facial recognition",
+        "multi-camera biometric authentication"
+      ]
+    }
+  ]
+}
+
+This gives you two different things:
+concept
+   ↓
+semantic meaning
+
+keywords
+   ↓
+USPTO lexical search
+
+That is much stronger than asking one phrase to perform both jobs.
+But don't change the entire schema yet
+If your current Claude output is already:
+core_system: list[str]
+
+
+we can do this incrementally.
+Change the prompt to generate short, searchable Core phrases, then inspect the result.
+Add a Core terminology quality check
+Before building the USPTO query, add:
+def validate_core_terms(    terms: list[str],) -> list[str]:    """    Keep Core terms suitable for lexical patent search.    """    generic_terms = {        "camera",        "sensor",        "processor",        "computer",        "artificial intelligence",        "ai",        "machine learning",        "image processing",        "facial recognition",        "face detection",    }    validated: list[str] = []    for term in terms:        cleaned = str(term).strip()        if not cleaned:            continue        if cleaned.lower() in generic_terms:            continue        validated.append(cleaned)    return validated
+
+
+Then:
+core_terms = validate_core_terms(    structure.get("core_system", []))core_expr = _build_role_expression(core_terms)
+
+
+Important
+This is not a hard filter on patents.
+It is only preventing a useless Core expression such as:
+camera
+
+from becoming the invention identity.
+Don't over-filter Core
+I would not reject a Core concept just because it contains:
+camera
+
+For example:
+camera assembly with synchronized multi-angle illumination
+
+could be a very good Core concept.
+So the validation should reject only standalone generic terms, not terms containing generic technology as part of a distinctive arrangement.
+The other major issue: your cosine score
+We still have:
+Cosine = 0
+
+almost everywhere.
+And now we have enough evidence that this should be treated as a separate technical bug.
+For example:
+US20210397817A1
+hybrid    0.2376
+cosine    0
+BM25      0.5898
+coverage  1
+
+while:
+US20180307898A1
+hybrid    0.2016
+cosine    0
+BM25      0.5864
+coverage  0.6478
+
+This strongly suggests the current ranking is being driven primarily by lexical matching.
+Before touching ranking weights, add this exact diagnostic:
+logger.info(    "COSINE RAW | min=%.6f | max=%.6f | mean=%.6f",    float(np.min(cosine)),    float(np.max(cosine)),    float(np.mean(cosine)),)for i in range(min(10, len(cosine))):    logger.info(        "COSINE RAW SAMPLE | patent=%s | value=%.6f",        patents[i].patent_id,        float(cosine[i]),    )
+
+
+We need to know whether the actual cosine is:
+0.000000
+
+or whether it is something like:
+0.53
+
+but is being converted to zero later.
+One thing we can conclude with confidence
+Your current retrieval architecture is not fundamentally wrong.
+In fact, this is now a good architecture:
+                    AI invention structure
+                             │
+             ┌───────────────┴───────────────┐
+             │                               │
+        Core identity                  Implementation
+             │                               │
+        Core Only                         Sensor
+        Core + Function                  Function
+        Core + Sensor                    Object
+        Core + Function + Sensor             │
+             │                               │
+             └───────────────┬───────────────┘
+                             ↓
+                      candidate corpus
+                             ↓
+                         deduplication
+                             ↓
+                         embeddings
+                             ↓
+                    hybrid ranking
+
+The problem is that currently:
+Core branch       = 0
+Implementation    = 32
+
+So the ranking never gets a chance to compare invention-specific evidence against implementation-level evidence.
+Your current 32 → 24 result is actually useful
+You now have:
+32 raw
+ ↓
+24 unique
+ ↓
+8 removed
+
+That tells us the candidate-generation/dedup pipeline is functioning.
+The 8 removed are presumably publication/family duplicates, which is exactly what we wanted.
+So do not change deduplication.
+The next test I recommend
+Don't make any more ranking changes.
+Make only these two changes:
+A. Improve Core terminology generation
+Use the revised prompt above.
+B. Capture actual cosine values
+Add the logging above.
+Then run the same invention.
+The target isn't necessarily "more patents."
+The target is something like:
+Core Only                    5–20
+Core + Function              1–15
+Core + Sensor                1–15
+Core + Function + Sensor     0–10
+Sensor + Function           10–30
+Sensor + Object + Function   5–20
+
+Those numbers are illustrative, not thresholds.
+More importantly, the titles from Core Only should start looking technically different from the current generic list.
+For example, instead of almost everything being:
+FACE DETECTION
+FACIAL RECOGNITION
+CAMERA
+IMAGE SENSOR
+
+we want Core-derived candidates that reflect the distinctive technical arrangement of the invention.
+Once we have that, the next step is finally justified:
+Core/Function/Sensor search-path strength + critical / important / supporting as soft ranking signals, rather than hard filters.

@@ -406,8 +406,53 @@ def rank(
         logger.warning("rank() called with no patents; returning empty list.")
         return []
 
+    logger.info("PATENT VECTOR SHAPE: %s", doc_vecs.shape)
+    logger.info("QUERY VECTOR SHAPE: %s", query_vec.shape)
+
+    patent_norms = np.linalg.norm(doc_vecs, axis=1)
+    query_norm = float(np.linalg.norm(query_vec))
+
+    logger.info(
+        "PATENT VECTOR NORM: min=%.6f max=%.6f mean=%.6f",
+        float(np.min(patent_norms)),
+        float(np.max(patent_norms)),
+        float(np.mean(patent_norms)),
+    )
+    logger.info("QUERY VECTOR NORM: %.6f", query_norm)
+
+    if patent_norms.size == 0:
+        logger.warning("No patent vectors available — returning empty ranking.")
+        return []
+
+    if np.any(patent_norms <= 1e-12) or query_norm <= 1e-12:
+        logger.error(
+            "Embedding vectors are degenerate: patent_norm_min=%.6f query_norm=%.6f. "
+            "Stopping before ranking.",
+            float(np.min(patent_norms)),
+            query_norm,
+        )
+        return []
+
     # 1. Cosine similarity — raw, already in [0, 1] for L2-normalised vectors.
     cosine = cosine_similarity_matrix(query_vec, doc_vecs)
+    logger.info(
+        "RAW COSINE: min=%.6f max=%.6f mean=%.6f",
+        float(np.min(cosine)),
+        float(np.max(cosine)),
+        float(np.mean(cosine)),
+    )
+    logger.info(
+        "COSINE RAW | min=%.6f | max=%.6f | mean=%.6f",
+        float(np.min(cosine)),
+        float(np.max(cosine)),
+        float(np.mean(cosine)),
+    )
+    for i in range(min(10, len(cosine))):
+        logger.info(
+            "COSINE RAW SAMPLE | patent=%s | value=%.6f",
+            patents[i].patent_id,
+            float(cosine[i]),
+        )
 
     # 2. Cosine threshold filter.
     all_indices = np.arange(len(patents))
@@ -415,6 +460,18 @@ def rank(
         cosine,
         all_indices,
     )
+    logger.info(
+        "COSINE FILTER | threshold=%.6f | passed=%d/%d",
+        float(threshold_used),
+        len(keep_indices),
+        len(patents),
+    )
+    for i in keep_indices[:10]:
+        logger.info(
+            "COSINE SAMPLE | patent=%s | cosine=%.6f",
+            patents[int(i)].patent_id,
+            float(cosine[int(i)]),
+        )
 
     if len(keep_indices) == 0:
         logger.warning(
@@ -621,6 +678,7 @@ def rank(
                     coverage_selected[i]["coverage"]
                 ),
                 concept_hits=coverage_selected[i]["concept_hits"],
+                search_paths=list(patent.search_paths),
                 importance_score=float(
                     importance_selected[i]
                 ),
@@ -670,6 +728,7 @@ def rank(
                         coverage_all[original_i]["coverage"]
                     ),
                     concept_hits=coverage_all[original_i]["concept_hits"],
+                    search_paths=list(patent.search_paths),
                     importance_score=float(
                         importance_scores[original_i]
                     ),
@@ -696,6 +755,17 @@ def rank(
         len(ranked),
         ranked[0].hybrid_score if ranked else 0.0,
     )
+
+    for idx in range(min(10, len(ranked))):
+        item = ranked[idx]
+        logger.info(
+            "RANKED PATENT | rank=%d | id=%s | cosine=%.6f | bm25=%.6f | hybrid=%.6f",
+            idx + 1,
+            item.patent.patent_id,
+            item.cosine_score,
+            item.bm25_score,
+            item.hybrid_score,
+        )
 
     # Log a per-patent breakdown for the top-5 results.
     anchors = [

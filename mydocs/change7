@@ -1,0 +1,90 @@
+This run gives us one useful change:
+- Raw: 21
+- After dedup: 13
+- Duplicates removed: 8
+- Sensor + Function: 18
+- Sensor + Object + Function: 3
+- Core paths: still 0
+But the most important observation is that Core Only is still absent. So the code change to add that path is not reaching the displayed/search execution path.
+At this point, I would stop modifying the search logic and verify the actual code path.
+1. Add this immediately after build_search_paths_from_structure()
+search_paths = build_search_paths_from_structure(invention_structure)st.write(    "DEBUG SEARCH PATHS:",    [p.get("name") for p in search_paths])st.json(search_paths)
+
+
+You should see exactly:
+DEBUG SEARCH PATHS:
+[
+    "Core Only",
+    "Core + Function",
+    "Core + Sensor",
+    "Core + Function + Sensor",
+    "Sensor + Function",
+    "Sensor + Object + Function"
+]
+
+2. If Core Only is missing
+Then the problem is definitely in build_search_paths_from_structure() or the function being imported.
+Add:
+import inspectst.code(    inspect.getsource(build_search_paths_from_structure))
+
+
+This is a very useful diagnostic because it shows the exact function Streamlit is executing, rather than the file version we think we're editing.
+If it doesn't contain:
+if core_expr:    paths.append({        "name": "Core Only",        ...    })
+
+
+then you're editing the wrong file/module, or Streamlit is loading another copy.
+3. If Core Only appears in the debug list but not in the performance table
+Then the execution/UI layer is filtering it out.
+Find the code that builds:
+Search Structure Performance
+
+and remove any hard-coded list like:
+[    "Sensor + Function",    "Core + Function",    "Core + Sensor",    "Core + Function + Sensor",    "Sensor + Object + Function",]
+
+
+Instead render directly from:
+st.session_state.ai_search_path_results
+
+
+That will automatically include Core Only.
+4. If Core Only appears and is executed but returns 0
+Then we finally have the useful result we have been trying to reach.
+At that point log:
+for path in search_paths:    logger.info(        "SEARCH PATH | %s | %s",        path["name"],        path["expression"],    )
+
+
+We need the actual:
+Core Only = (...)
+
+query.
+If that query contains good invention-specific terminology and USPTO still returns zero, then we investigate the USPTO query syntax/terminology.
+One more thing: the cosine issue remains unresolved
+Your table still has:
+Cosine = 0
+
+for virtually every patent.
+For example:
+US20220222465A1
+hybrid   0.2448
+cosine   0
+BM25     0.6206
+
+This should be treated as a separate bug, not a ranking-tuning issue.
+Please run:
+logger.info(    "COSINE RAW | min=%.6f | max=%.6f | mean=%.6f",    float(np.min(cosine)),    float(np.max(cosine)),    float(np.mean(cosine)),)
+
+
+and:
+for i in range(min(10, len(cosine))):    logger.info(        "COSINE RAW SAMPLE | patent=%s | value=%.6f",        patents[i].patent_id,        float(cosine[i]),    )
+
+
+We now have two precise tests:
+Test A
+Does `Core Only` actually exist in the generated paths?
+
+Test B
+Are raw cosine values actually zero?
+
+Don't change the weights, coverage penalty, or critical/important/supporting logic yet.
+The 21 → 13 deduplication is working; the remaining work is to establish exactly where Core paths disappear and why cosine is displayed as zero. Once those two diagnostics are resolved, we can make the next code change with confidence.

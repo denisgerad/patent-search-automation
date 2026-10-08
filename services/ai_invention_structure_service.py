@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 
 from services.claude_client import ClaudeClient
+
+logger = logging.getLogger(__name__)
 
 
 SYSTEM_PROMPT = """
@@ -28,6 +31,81 @@ The application/domain in which the invention operates.
 
 core_system:
 The main technical system, apparatus, method, or subsystem.
+
+CORE SYSTEM — PATENT SEARCH TERMINOLOGY
+
+The core_system is the most important part of the invention
+composition.
+
+It must identify the technical system, apparatus, subsystem,
+architecture, or component arrangement that represents the invention.
+
+However, the terminology must also be suitable for patent searching.
+
+For each core system concept, provide terminology that is likely to
+appear in patent claims, abstracts, titles, or descriptions.
+
+DO NOT use abstract or marketing language.
+
+DO NOT use generic enabling technologies unless they are themselves
+the invention.
+
+Avoid standalone terms such as:
+
+- camera
+- sensor
+- processor
+- computer
+- AI
+- artificial intelligence
+- machine learning
+- image processing
+- facial recognition
+- face detection
+
+unless one of these is genuinely the inventive subject.
+
+Instead identify the technical combination or arrangement.
+
+For example, prefer terminology of the form:
+
+"[distinctive component] + [technical relationship] + [technical operation]"
+
+rather than a generic technology name.
+
+The core terminology should satisfy this test:
+
+"If I searched this phrase by itself in a patent database,
+would I reasonably expect to retrieve patents describing this
+specific technical invention or a closely related invention?"
+
+If the answer is no, make the terminology more technically specific.
+
+IMPORTANT:
+
+Generate between 2 and 5 core concepts.
+
+Each concept should be independently searchable.
+
+For each concept, provide:
+
+- a concise technical phrase
+- important patent terminology/synonyms
+- the distinctive technical relationship
+
+Do not combine every invention detail into one extremely long phrase.
+
+Do not use natural-language sentences as search terms.
+
+Prefer short, searchable phrases such as:
+
+- coordinated multi-camera illumination system
+- synchronized stereo image registration
+- adaptive light pattern projection and detection
+- event-driven image correlation architecture
+
+The core system should represent the invention identity,
+not the generic hardware used to implement it.
 
 sensors:
 Sensors, sensing technologies, cameras, detectors, or input devices.
@@ -248,6 +326,24 @@ def _combine_roles(*expressions: str) -> str:
     return " AND ".join(f"({part})" for part in parts)
 
 
+def _build_broadened_role_expression(terms: list[str]) -> str:
+    """Broaden a sparse role list without losing the role structure."""
+
+    cleaned = [
+        str(term).strip()
+        for term in terms
+        if str(term).strip()
+    ]
+
+    if not cleaned:
+        return ""
+
+    return " OR ".join(
+        f'"{term}"' if " " in term else term
+        for term in cleaned
+    )
+
+
 def build_search_paths_from_structure(
     structure: dict,
 ) -> list[dict]:
@@ -306,10 +402,76 @@ def build_search_paths_from_structure(
         objects
     )
 
+    logger.info(
+        "SEARCH ROLE EXPRESSIONS | core=%r | sensor=%r | function=%r | object=%r",
+        core_expr,
+        sensor_expr,
+        function_expr,
+        object_expr,
+    )
+
     paths = []
 
     # ------------------------------------------------------------------
-    # 1. CORE + FUNCTION
+    # 0. CORE ONLY (recall-oriented invention identity)
+    # ------------------------------------------------------------------
+    if core_expr:
+        path = {
+            "name": "Core Only",
+            "roles": ["core_system"],
+            "quality_level": "recall",
+            "recall_priority": 5,
+            "precision_priority": 2,
+            "purpose": (
+                "Search the invention identity alone to preserve recall "
+                "before implementation-level paths are applied."
+            ),
+            "expression": core_expr,
+            "limit": 25,
+        }
+        paths.append(path)
+        logger.info(
+            "SEARCH PATH: %s",
+            json.dumps(path, indent=2, ensure_ascii=False),
+        )
+
+    # ------------------------------------------------------------------
+    # 1. SENSOR + FUNCTION
+    # ------------------------------------------------------------------
+    # Technical search.
+    #
+    # Purpose:
+    #   Good recall of patents using different system terminology
+    #   but describing similar technical behaviour.
+    # ------------------------------------------------------------------
+
+    if sensor_expr and function_expr:
+        path = {
+            "name": "Sensor + Function",
+            "roles": [
+                "sensors",
+                "functions",
+            ],
+            "quality_level": "broad",
+            "recall_priority": 4,
+            "precision_priority": 4,
+            "purpose": (
+                "Search the sensing technology together with "
+                "the functions it performs."
+            ),
+            "expression": _combine_roles(
+                sensor_expr,
+                function_expr,
+            ),
+        }
+        paths.append(path)
+        logger.info(
+            "SEARCH PATH: %s",
+            json.dumps(path, indent=2, ensure_ascii=False),
+        )
+
+    # ------------------------------------------------------------------
+    # 2. CORE + FUNCTION
     # ------------------------------------------------------------------
     # Broad invention-identity search.
     #
@@ -320,57 +482,28 @@ def build_search_paths_from_structure(
     # ------------------------------------------------------------------
 
     if core_expr and function_expr:
-        paths.append(
-            {
-                "name": "Core + Function",
-                "roles": [
-                    "core_system",
-                    "functions",
-                ],
-                "quality_level": "broad",
-                "recall_priority": 5,
-                "precision_priority": 2,
-                "purpose": (
-                    "Broad search connecting the core system with "
-                    "its primary functions."
-                ),
-                "expression": _combine_roles(
-                    core_expr,
-                    function_expr,
-                ),
-            }
-        )
-
-    # ------------------------------------------------------------------
-    # 2. SENSOR + FUNCTION
-    # ------------------------------------------------------------------
-    # Technical search.
-    #
-    # Purpose:
-    #   Good recall of patents using different system terminology
-    #   but describing similar technical behaviour.
-    # ------------------------------------------------------------------
-
-    if sensor_expr and function_expr:
-        paths.append(
-            {
-                "name": "Sensor + Function",
-                "roles": [
-                    "sensors",
-                    "functions",
-                ],
-                "quality_level": "broad",
-                "recall_priority": 4,
-                "precision_priority": 4,
-                "purpose": (
-                    "Search the sensing technology together with "
-                    "the functions it performs."
-                ),
-                "expression": _combine_roles(
-                    sensor_expr,
-                    function_expr,
-                ),
-            }
+        path = {
+            "name": "Core + Function",
+            "roles": [
+                "core_system",
+                "functions",
+            ],
+            "quality_level": "broad",
+            "recall_priority": 5,
+            "precision_priority": 2,
+            "purpose": (
+                "Broad search connecting the core system with "
+                "its primary functions."
+            ),
+            "expression": _combine_roles(
+                core_expr,
+                function_expr,
+            ),
+        }
+        paths.append(path)
+        logger.info(
+            "SEARCH PATH: %s",
+            json.dumps(path, indent=2, ensure_ascii=False),
         )
 
     # ------------------------------------------------------------------
@@ -383,25 +516,28 @@ def build_search_paths_from_structure(
     # ------------------------------------------------------------------
 
     if core_expr and sensor_expr:
-        paths.append(
-            {
-                "name": "Core + Sensor",
-                "roles": [
-                    "core_system",
-                    "sensors",
-                ],
-                "quality_level": "balanced",
-                "recall_priority": 3,
-                "precision_priority": 6,
-                "purpose": (
-                    "Search for the core system together with "
-                    "the sensing architecture."
-                ),
-                "expression": _combine_roles(
-                    core_expr,
-                    sensor_expr,
-                ),
-            }
+        path = {
+            "name": "Core + Sensor",
+            "roles": [
+                "core_system",
+                "sensors",
+            ],
+            "quality_level": "balanced",
+            "recall_priority": 3,
+            "precision_priority": 6,
+            "purpose": (
+                "Search for the core system together with "
+                "the sensing architecture."
+            ),
+            "expression": _combine_roles(
+                core_expr,
+                sensor_expr,
+            ),
+        }
+        paths.append(path)
+        logger.info(
+            "SEARCH PATH: %s",
+            json.dumps(path, indent=2, ensure_ascii=False),
         )
 
     # ------------------------------------------------------------------
@@ -415,29 +551,32 @@ def build_search_paths_from_structure(
     # ------------------------------------------------------------------
 
     if core_expr and function_expr and sensor_expr:
-        paths.append(
-            {
-                "name": "Core + Function + Sensor",
-                "roles": [
-                    "core_system",
-                    "functions",
-                    "sensors",
-                ],
-                "quality_level": "focused",
-                "recall_priority": 2,
-                "precision_priority": 10,
-                "purpose": (
-                    "High-precision search requiring the core system, "
-                    "its function, and the sensing technology together."
-                ),
-                "expression": (
-                    f"{core_expr}\n"
-                    "AND\n"
-                    f"{function_expr}\n"
-                    "AND\n"
-                    f"{sensor_expr}"
-                ),
-            }
+        path = {
+            "name": "Core + Function + Sensor",
+            "roles": [
+                "core_system",
+                "functions",
+                "sensors",
+            ],
+            "quality_level": "focused",
+            "recall_priority": 2,
+            "precision_priority": 10,
+            "purpose": (
+                "High-precision search requiring the core system, "
+                "its function, and the sensing technology together."
+            ),
+            "expression": (
+                f"{core_expr}\n"
+                "AND\n"
+                f"{function_expr}\n"
+                "AND\n"
+                f"{sensor_expr}"
+            ),
+        }
+        paths.append(path)
+        logger.info(
+            "SEARCH PATH: %s",
+            json.dumps(path, indent=2, ensure_ascii=False),
         )
 
     # ------------------------------------------------------------------
@@ -451,33 +590,34 @@ def build_search_paths_from_structure(
     # ------------------------------------------------------------------
 
     if sensor_expr and object_expr and function_expr:
-        paths.append(
-            {
-                "name": "Sensor + Object + Function",
-                "roles": [
-                    "sensors",
-                    "objects",
-                    "functions",
-                ],
-                "quality_level": "focused",
-                "recall_priority": 2,
-                "precision_priority": 8,
-                "purpose": (
-                    "Search the sensing technology in relation to "
-                    "specific objects and functions."
-                ),
-                "expression": (
-                    f"{sensor_expr}\n"
-                    "AND\n"
-                    f"{object_expr}\n"
-                    "AND\n"
-                    f"{function_expr}"
-                ),
-            }
+        path = {
+            "name": "Sensor + Object + Function",
+            "roles": [
+                "sensors",
+                "objects",
+                "functions",
+            ],
+            "quality_level": "focused",
+            "recall_priority": 2,
+            "precision_priority": 8,
+            "purpose": (
+                "Search the sensing technology in relation to "
+                "specific objects and functions."
+            ),
+            "expression": (
+                f"{sensor_expr}\n"
+                "AND\n"
+                f"{object_expr}\n"
+                "AND\n"
+                f"{function_expr}"
+            ),
+        }
+        paths.append(path)
+        logger.info(
+            "SEARCH PATH: %s",
+            json.dumps(path, indent=2, ensure_ascii=False),
         )
-
     return paths
-
 
 def generate_invention_structure(
     invention: str,
@@ -519,6 +659,24 @@ def generate_invention_structure(
 
     structure["search_paths"] = build_search_paths_from_structure(
         structure
+    )
+
+    logger.info(
+        "GENERATED SEARCH PATHS:\n%s",
+        json.dumps(
+            structure["search_paths"],
+            indent=2,
+            ensure_ascii=False,
+        ),
+    )
+
+    logger.info(
+        "AI INVENTION STRUCTURE:\n%s",
+        json.dumps(
+            structure,
+            indent=2,
+            ensure_ascii=False,
+        ),
     )
 
     return structure

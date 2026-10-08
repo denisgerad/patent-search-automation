@@ -1,0 +1,113 @@
+1. Change build_boolean_search()
+In services/search_strategy_service.py, replace the current build_boolean_search() with this approach:
+def _field_expression(term_expression: str, fields: list[str]) -> str:    """    Expand one concept expression across the selected USPTO fields.    Example:        ("fraud score" OR "risk score")    becomes:        (            ("fraud score" OR "risk score").TI.            OR            ("fraud score" OR "risk score").AB.            OR            ("fraud score" OR "risk score").CLM.        )    """    field_map = {        "title": "TI",        "abstract": "AB",        "claims": "CLM",    }    expressions = []    for field in fields:        code = field_map.get(field.lower())        if not code:            continue        expressions.append(f"({term_expression}).{code}.")    if not expressions:        return ""    return "(" + " OR ".join(expressions) + ")"
+
+
+Important
+The exact attribute names in your SearchStrategy / concept model may differ.
+Your current output suggests your concept has something like:
+concept.termsconcept.importance
+
+
+If your actual field is called keywords rather than terms, use:
+terms = [    term.strip()    for term in concept.keywords    if term and term.strip()]
+
+
+So don't blindly replace that part if your existing model uses a different name.
+2. What the query should become
+Your current query is:
+("fraud score" OR "risk score" OR "fraud risk assessment").TI.
+AND
+("context-aware fraud detection" OR "contextual fraud analysis" OR "situational fraud detection").TI.
+
+After this change it should become approximately:
+(
+  ("fraud score" OR "risk score" OR "fraud risk assessment").TI.
+  OR
+  ("fraud score" OR "risk score" OR "fraud risk assessment").AB.
+  OR
+  ("fraud score" OR "risk score" OR "fraud risk assessment").CLM.
+)
+AND
+(
+  ("context-aware fraud detection" OR "contextual fraud analysis" OR "situational fraud detection").TI.
+  OR
+  ("context-aware fraud detection" OR "contextual fraud analysis" OR "situational fraud detection").AB.
+  OR
+  ("context-aware fraud detection" OR "contextual fraud analysis" OR "situational fraud detection").CLM.
+)
+
+This is the first experiment.
+3. Add one debug print
+Before returning the query:
+boolean_query = " AND ".join(concept_expressions)print("\n===== GENERATED BOOLEAN SEARCH =====")print(boolean_query)print("====================================\n")return boolean_query
+
+
+Run your exact fraud prompt.
+4. What we are looking for
+There are three possible outcomes.
+Outcome A — patents appear
+Excellent.
+For example:
+Raw fetched: 30
+After dedup: 20
+
+Then we've confirmed:
+The zero-result problem was primarily caused by searching each concept only in the title.
+
+We can then move on to precision/recall.
+Outcome B — still zero
+That's also useful.
+It means:
+field restriction
+     ↓
+not the primary problem
+
+Then the next thing we'll change is the lexical strictness of the two critical concepts.
+Specifically, I would change:
+"context-aware fraud detection"
+
+into a more patent-realistic concept such as:
+fraud
+AND
+(detection OR prevention OR identification)
+
+and similarly broaden:
+"fraud score"
+
+to include:
+fraud
+AND
+(score OR risk OR assessment OR rating)
+
+But don't do that yet.
+Outcome C — USPTO returns an error
+Then the problem is likely the generated ODP syntax, and we'll fix that rather than changing the search concepts.
+5. One more diagnostic I strongly recommend
+Since this is for tomorrow's demo, add this immediately after the USPTO call:
+print("\n===== USPTO RESULT =====")print("Query:", query)print("Requested limit:", limit)print("Raw records returned:", len(raw_records))print("========================\n")
+
+
+That lets us distinguish:
+Generated query = valid
+USPTO = 0
+
+from:
+Generated query = malformed
+USPTO = 0
+
+Don't change anything else yet
+For this test, leave these untouched:
+- Search Concepts prompt
+- critical/important definitions
+- Core search
+- embeddings
+- cosine threshold
+- BM25
+- hybrid ranking
+- deduplication
+- semantic scoring
+We're doing a controlled experiment:
+Same concepts + same critical concepts + same terms, but search each concept across Title OR Abstract OR Claims.
+
+

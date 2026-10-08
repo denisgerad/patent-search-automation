@@ -555,6 +555,12 @@ def search_patents_by_strategy(
 
     raw_records = data.get("patentFileWrapperDataBag", [])
 
+    print("\n===== USPTO RESULT =====")
+    print("Query:", query)
+    print("Requested limit:", limit)
+    print("Raw records returned:", len(raw_records))
+    print("========================\n")
+
     records: list[PatentRecord] = []
 
     for raw in raw_records:

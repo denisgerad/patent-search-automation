@@ -1090,3 +1090,1568 @@ I would add:
 search_paths: list[str] = Field(default_factory=list)
 
 
+8. models/schemas.py
+You already added search_paths, so keep it.
+PatentRecord
+Make sure it looks like:
+class PatentRecord(BaseModel):
+    patent_id: str
+    patent_title: str
+
+    patent_abstract: str | None = None
+    patent_type: str | None = None
+    patent_date: str | None = None
+
+    continuity_family_id: str | None = None
+
+    uspc_class: str | None = None
+    uspc_subclass: str | None = None
+
+    cpc_classifications: list[str] = Field(default_factory=list)
+    ipc_classifications: list[str] = Field(default_factory=list)
+
+    # Search paths that caused this patent to enter the candidate set.
+    search_paths: list[str] = Field(default_factory=list)
+
+If you already have the field, don't add another family field.
+Also change RankedPatent if it currently has:
+concept_hits: dict = {}
+
+to:
+
+concept_hits: dict = Field(default_factory=dict)
+
+Fix search_patents_by_strategy()
+In your USPTO service, replace the current implementation that effectively does:
+return [    _build_patent_record(raw)    for raw in raw_records]
+
+
+with:
+
+records: list[PatentRecord] = []
+
+for raw in raw_records:
+    if not isinstance(raw, dict):
+        continue
+
+    patent = _build_patent_record(raw)
+
+    if patent is not None:
+        records.append(patent)
+
+return records
+
+So the complete method should be along these lines:
+
+def search_patents_by_strategy(
+    query: str,
+    limit: int = 100,
+) -> list[PatentRecord]:
+    """
+    Execute a provider-ready Boolean search expression against USPTO ODP.
+    """
+
+    query = " ".join(str(query).split()).strip()
+
+    if not query:
+        return []
+
+    payload = {
+        "q": query,
+        "pagination": {
+            "offset": 0,
+            "limit": min(limit, 100),
+        },
+    }
+
+    response = requests.post(
+        self.search_url,
+        json=payload,
+        headers=self.headers,
+        timeout=self.timeout,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    raw_records = (
+        data.get("patentFileWrapperDataBag", [])
+        if isinstance(data, dict)
+        else []
+    )
+
+    records: list[PatentRecord] = []
+
+    for raw in raw_records:
+        if not isinstance(raw, dict):
+            continue
+
+        patent = _build_patent_record(raw)
+
+        if patent is not None:
+            records.append(patent)
+
+    return records
+
+Fix the AI Invention Structure prompt
+This is the most important change right now.
+Find the prompt/instructions where Claude creates:
+application
+core_system
+sensors
+functions
+objects
+
+Add this section to the prompt.
+
+CORE SYSTEM RULES
+
+The core_system role is the most important search role.
+
+The core_system must represent the distinctive technical identity of
+the invention, not merely the generic technology used to implement it.
+
+Do NOT populate core_system with generic enabling technologies such as:
+
+- camera
+- image sensor
+- processor
+- computer
+- artificial intelligence
+- machine learning
+- facial recognition
+- image processing
+- software
+- mobile device
+
+unless that technology itself is the inventive subject.
+
+Instead, identify the distinctive:
+
+- apparatus
+- system
+- subsystem
+- technical arrangement
+- component combination
+- processing architecture
+- operational relationship
+- method or sequence
+
+that makes the invention technically distinctive.
+
+For every invention, determine:
+
+1. What is the main technical thing being claimed?
+
+2. What combination of components or operations makes it distinctive?
+
+3. What would remain if generic technologies such as cameras,
+   processors, sensors or AI were removed?
+
+4. What technical relationship between components is important?
+
+The resulting core_system terms should represent the invention identity,
+rather than the generic technology used to implement it.
+
+IMPORTANT:
+
+If the invention uses a camera to perform a distinctive operation,
+"camera" should normally belong to the sensor role.
+
+If the invention uses facial recognition as part of a distinctive
+technical arrangement, "facial recognition" should normally belong to
+the function or implementation role rather than automatically becoming
+the core_system.
+
+Only make such terms part of core_system when they themselves define
+the inventive subject.
+
+Also add a quality requirement
+Immediately after that, add:
+
+CORE SYSTEM QUALITY CHECK
+
+Before returning the structure, verify that the core_system would
+distinguish the invention from hundreds of generic patents involving
+the same sensors or general-purpose technology.
+
+If a core_system term could describe thousands of unrelated patents,
+replace it with a more specific technical arrangement or relationship.
+
+Prefer technical combinations and relationships over generic nouns.
+
+Make the search-path builder deterministic
+In services/search_strategy_service.py, add:
+def _combine_roles(*expressions: str) -> str:
+    """
+    Combine non-empty role expressions using AND.
+
+    Each role expression is kept grouped so OR terms inside a role
+    cannot change the intended Boolean structure.
+    """
+    parts = [
+        expression.strip()
+        for expression in expressions
+        if expression and expression.strip()
+    ]
+
+    return " AND ".join(
+        f"({part})"
+        for part in parts
+    )
+
+Then your path generation should use this helper.
+For example:
+def build_search_paths_from_structure(structure: dict) -> list[dict]:
+    core_expr = _build_role_expression(
+        structure.get("core_system", [])
+    )
+
+    sensor_expr = _build_role_expression(
+        structure.get("sensors", [])
+    )
+
+    function_expr = _build_role_expression(
+        structure.get("functions", [])
+    )
+
+    object_expr = _build_role_expression(
+        structure.get("objects", [])
+    )
+
+    paths: list[dict] = []
+
+    # Tier A — invention identity
+    expression = _combine_roles(
+        core_expr,
+        function_expr,
+    )
+
+    if expression:
+        paths.append({
+            "name": "Core + Function",
+            "expression": expression,
+            "quality_level": "broad",
+            "recall_priority": "high",
+            "precision_priority": "medium",
+        })
+
+    expression = _combine_roles(
+        core_expr,
+        sensor_expr,
+    )
+
+    if expression:
+        paths.append({
+            "name": "Core + Sensor",
+            "expression": expression,
+            "quality_level": "balanced",
+            "recall_priority": "medium",
+            "precision_priority": "high",
+        })
+
+    expression = _combine_roles(
+        core_expr,
+        function_expr,
+        sensor_expr,
+    )
+
+    if expression:
+        paths.append({
+            "name": "Core + Function + Sensor",
+            "expression": expression,
+            "quality_level": "focused",
+            "recall_priority": "low",
+            "precision_priority": "high",
+        })
+
+    # Tier B — implementation discovery
+    expression = _combine_roles(
+        sensor_expr,
+        function_expr,
+    )
+
+    if expression:
+        paths.append({
+            "name": "Sensor + Function",
+            "expression": expression,
+            "quality_level": "broad",
+            "recall_priority": "high",
+            "precision_priority": "medium",
+        })
+
+    expression = _combine_roles(
+        sensor_expr,
+        object_expr,
+        function_expr,
+    )
+
+    if expression:
+        paths.append({
+            "name": "Sensor + Object + Function",
+            "expression": expression,
+            "quality_level": "focused",
+            "recall_priority": "medium",
+            "precision_priority": "high",
+        })
+
+    return paths
+
+Preserve search-path provenance
+This is where your new:
+search_paths: list[str]
+
+
+field becomes useful.
+
+Where you currently have something like:
+for path in ai_approved_search_paths:    results = search_patents_by_strategy(        path["expression"]    )
+
+
+change it to:
+
+for path in ai_approved_search_paths:
+    path_name = path.get("name", "Unnamed Search Path")
+    expression = path.get("expression", "")
+
+    results = search_patents_by_strategy(
+        expression
+    )
+
+    for patent in results:
+        if path_name not in patent.search_paths:
+            patent.search_paths.append(path_name)
+
+    all_results.extend(results)
+
+So a patent could eventually contain:
+search_paths = [    "Sensor + Function",    "Sensor + Object + Function",]
+
+
+while another might contain:
+
+search_paths = [
+    "Core + Function",
+    "Core + Function + Sensor",
+]
+
+Do the same for the manual strategy path
+Where the approved manual strategy does:
+strategy_queries = build_core_pair_queries(strategy)for query in strategy_queries:    results = search_patents_by_strategy(query)    all_results.extend(results)
+
+
+change it to:
+
+strategy_queries = build_core_pair_queries(strategy)
+
+for query in strategy_queries:
+    results = search_patents_by_strategy(query)
+
+    for patent in results:
+        path_name = "Manual Search Strategy"
+
+        if path_name not in patent.search_paths:
+            patent.search_paths.append(path_name)
+
+    all_results.extend(results)
+
+Add cosine diagnostics to ranking_service.py
+Do not change the cosine threshold or weights yet.
+Immediately after cosine similarity is calculated, add logging.
+For example, after:
+cosine = ...
+
+
+add:
+
+logger.info(
+    "COSINE DIAGNOSTIC: min=%.6f max=%.6f mean=%.6f",
+    float(cosine.min()),
+    float(cosine.max()),
+    float(cosine.mean()),
+)
+
+Then immediately after _apply_cosine_threshold():
+logger.info(    "COSINE FILTER: threshold=%.4f passed=%d/%d",    threshold_used,    len(keep_indices),    len(patents),)
+
+
+And:
+
+for i in keep_indices[:5]:
+    logger.info(
+        "COSINE SAMPLE: %s = %.6f",
+        patents[i].patent_id,
+        float(cosine[i]),
+    )
+
+Add search-path information to the ranking output
+You don't need to make it a ranking signal yet.
+First expose it.
+If your RankedPatent currently looks approximately like:
+
+class RankedPatent(BaseModel):
+    patent: PatentRecord
+    cosine_score: float
+    bm25_score: float
+    hybrid_score: float
+    coverage_score: float | None = None
+    concept_hits: dict = Field(default_factory=dict)
+
+add:
+    search_paths: list[str] = Field(default_factory=list)
+
+Then when constructing it in ranking_service.py:
+
+RankedPatent(
+    patent=patents[i],
+    cosine_score=float(cosine[i]),
+    bm25_score=float(bm25_scores[i]),
+    hybrid_score=float(hybrid_scores[i]),
+    coverage_score=float(coverage_scores[i]),
+    concept_hits=concept_hits[i],
+    search_paths=list(patents[i].search_paths),
+)
+
+Show provenance in Streamlit
+In your Technical Relevance table, add:
+"Search Paths": ", ".join(    ranked.search_paths) if ranked.search_paths else "—"
+
+
+For example:
+
+rows.append({
+    "Patent": ranked.patent.patent_id,
+    "Title": ranked.patent.patent_title,
+    "Hybrid": round(ranked.hybrid_score, 4),
+    "Cosine": round(ranked.cosine_score, 4),
+    "BM25": round(ranked.bm25_score, 4),
+    "Coverage": round(ranked.coverage_score, 4),
+    "Search Paths": ", ".join(ranked.search_paths) or "—",
+})
+
+Add a Core-path diagnostic to Search Structure Performance
+You currently have:
+Core + Function                 0
+Sensor + Function             49
+Core + Sensor                  0
+Core + Function + Sensor       0
+Sensor + Object + Function    32
+
+Add a warning after the search paths have executed:
+
+core_paths = {
+    "Core + Function",
+    "Core + Sensor",
+    "Core + Function + Sensor",
+}
+
+core_results = sum(
+    result["count"]
+    for result in st.session_state.get(
+        "ai_search_path_results",
+        []
+    )
+    if result.get("name") in core_paths
+)
+
+if core_results == 0:
+    st.warning(
+        "No patents were retrieved from Core-based search paths. "
+        "The current candidate set is therefore dominated by "
+        "sensor/function terminology. Review the Core System "
+        "decomposition before relying on ranking results."
+    )
+
+
+9. In streamlit_app.py, immediately after the AI structure is returned, add:
+st.subheader("AI Invention Structure")
+
+st.json({
+    "application": invention_structure.get("application", []),
+    "core_system": invention_structure.get("core_system", []),
+    "sensors": invention_structure.get("sensors", []),
+    "functions": invention_structure.get("functions", []),
+    "objects": invention_structure.get("objects", []),
+})
+
+If you're already displaying this structure, don't duplicate it. Instead, temporarily add:
+logger.info(    "AI INVENTION STRUCTURE:\n%s",    json.dumps(invention_structure, indent=2, ensure_ascii=False),)
+
+
+We specifically need to see something like:
+{
+  "core_system": [
+    "...",
+    "..."
+  ],
+  "sensors": [
+    "camera",
+    "..."
+  ],
+  "functions": [
+    "face detection",
+    "..."
+  ]
+}
+
+Log the exact five USPTO queries
+This is even more important.
+In build_search_paths_from_structure(), after creating each path, log the actual expression.
+For example:
+logger.info(    "SEARCH PATH: %s",    json.dumps(path, indent=2, ensure_ascii=False),)
+
+
+Or, better, right before calling USPTO:
+logger.info(    "USPTO STRATEGY SEARCH | path=%s | query=%s",    path_name,    expression,)
+
+
+You want to see:
+USPTO STRATEGY SEARCH
+path=Core + Function
+query=(...) AND (...)
+
+USPTO STRATEGY SEARCH
+path=Core + Sensor
+query=(...) AND (...)
+
+USPTO STRATEGY SEARCH
+path=Core + Function + Sensor
+query=(...) AND (...) AND (...)
+
+USPTO STRATEGY SEARCH
+path=Sensor + Function
+query=(...) AND (...)
+
+USPTO STRATEGY SEARCH
+path=Sensor + Object + Function
+query=(...) AND (...) AND (...)
+
+This will immediately tell us whether the problem is AI decomposition or query construction.
+
+Add a Core-expression validation
+In search_strategy_service.py, add:
+def _has_expression(value: str | None) -> bool:    return bool(value and value.strip())
+
+
+Then in build_search_paths_from_structure():
+
+core_expr = _build_role_expression(
+    structure.get("core_system", [])
+)
+
+sensor_expr = _build_role_expression(
+    structure.get("sensors", [])
+)
+
+function_expr = _build_role_expression(
+    structure.get("functions", [])
+)
+
+object_expr = _build_role_expression(
+    structure.get("objects", [])
+)
+
+logger.info(
+    "SEARCH ROLE EXPRESSIONS | core=%r | sensor=%r | function=%r | object=%r",
+    core_expr,
+    sensor_expr,
+    function_expr,
+    object_expr,
+)
+
+Add a fallback Core expansion
+There is another change I recommend.
+Currently, if Claude gives one very narrow Core concept, USPTO may return zero.
+Instead of immediately abandoning that path, generate a broader Core expression.
+For example, add:
+def _build_broadened_role_expression(
+    terms: list[str],
+) -> str:
+    cleaned = [
+        str(term).strip()
+        for term in terms
+        if str(term).strip()
+    ]
+
+    if not cleaned:
+        return ""
+
+    return " OR ".join(
+        f'"{term}"' if " " in term else term
+        for term in cleaned
+    )
+
+Add a diagnostic fallback when Core returns zero
+In the path execution code:
+
+results = search_patents_by_strategy(
+    expression
+)
+
+logger.info(
+    "SEARCH RESULT | path=%s | count=%d",
+    path_name,
+    len(results),
+)
+
+Then:
+if path_name in {
+    "Core + Function",
+    "Core + Sensor",
+    "Core + Function + Sensor",
+} and not results:
+    logger.warning(
+        "CORE SEARCH RETURNED ZERO | path=%s | query=%s",
+        path_name,
+        expression,
+    )
+
+Add this immediately after cosine calculation:
+logger.info(    "COSINE DIAGNOSTIC | min=%.6f | max=%.6f | mean=%.6f",    float(np.min(cosine)),    float(np.max(cosine)),    float(np.mean(cosine)),)
+
+
+And before returning ranked results:
+
+for idx in range(min(10, len(ranked))):
+    item = ranked[idx]
+
+    logger.info(
+        "RANKED PATENT | rank=%d | id=%s | cosine=%.6f | bm25=%.6f | hybrid=%.6f",
+        idx + 1,
+        item.patent.patent_id,
+        item.cosine_score,
+        item.bm25_score,
+        item.hybrid_score,
+    )
+
+Also make sure you're not doing this:
+round(cosine_score)
+
+or:
+int(cosine_score)
+
+
+or:
+
+int(cosine_score * ...)
+
+The UI should use:
+round(float(cosine_score), 4)
+
+
+not integer conversion.
+
+Add this after deduplication:
+from collections import Counter
+
+path_counter = Counter()
+
+for patent in unique_patents:
+    for path in patent.search_paths:
+        path_counter[path] += 1
+
+logger.info(
+    "UNIQUE PATENT CONTRIBUTION BY SEARCH PATH: %s",
+    dict(path_counter),
+)
+
+10. Log the actual AI structure
+Where you receive the Claude invention structure, add:
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+
+logger.info(
+    "AI INVENTION STRUCTURE:\n%s",
+    json.dumps(
+        invention_structure,
+        indent=2,
+        ensure_ascii=False,
+    ),
+)
+
+Also temporarily display it in Streamlit:
+with st.expander("Debug: AI Invention Structure"):
+    st.json(invention_structure)
+
+Log the role expressions
+In build_search_paths_from_structure() add:
+logger.info(
+    "SEARCH ROLE EXPRESSIONS | core=%r | sensor=%r | function=%r | object=%r",
+    core_expr,
+    sensor_expr,
+    function_expr,
+    object_expr,
+)
+
+Log the exact USPTO query
+Right before:
+results = search_patents_by_strategy(expression)
+
+add:
+logger.info(
+    "USPTO SEARCH | path=%s | query=%s",
+    path_name,
+    expression,
+)
+
+Add result logging immediately after USPTO
+logger.info(    "USPTO RESULT | path=%s | count=%d",    path_name,    len(results),)
+
+
+And for Core paths:
+if (
+    path_name in {
+        "Core + Function",
+        "Core + Sensor",
+        "Core + Function + Sensor",
+    }
+    and not results
+):
+    logger.warning(
+        "ZERO CORE RESULTS | path=%s | query=%s",
+        path_name,
+        expression,
+    )
+
+Don't change the BM25/cosine weights yet.
+Instead, add this to ranking_service.py immediately after cosine is calculated:
+logger.info(
+    "COSINE DIAGNOSTIC | min=%.6f | max=%.6f | mean=%.6f",
+    float(np.min(cosine)),
+    float(np.max(cosine)),
+    float(np.mean(cosine)),
+)
+
+Then after cosine filtering:
+logger.info(
+    "COSINE FILTER | threshold=%.6f | passed=%d/%d",
+    float(threshold_used),
+    len(keep_indices),
+    len(patents),
+)
+
+And:
+for i in keep_indices[:10]:
+    logger.info(
+        "COSINE SAMPLE | patent=%s | cosine=%.6f",
+        patents[i].patent_id,
+        float(cosine[i]),
+    )
+One thing I would change now: show search-path provenance
+You already added:
+search_paths: list[str]
+
+
+to PatentRecord.
+
+Make sure you're populating it.
+For each path:
+
+for patent in results:
+    if path_name not in patent.search_paths:
+        patent.search_paths.append(path_name)
+
+Then when the final unique corpus is produced, calculate:
+from collections import Counter
+
+path_counts = Counter()
+
+for patent in unique_patents:
+    for path in patent.search_paths:
+        path_counts[path] += 1
+
+logger.info(
+    "UNIQUE CONTRIBUTION BY SEARCH PATH: %s",
+    dict(path_counts),
+)
+
+10. ## `services/search_strategy_service.py`
+Add:
+def _build_role_variants(terms: list[str]) -> list[str]:
+    """
+    Build a small set of deterministic variants for a search role.
+
+    The original terminology is retained. This only adds useful
+    phrase/individual-token variants and does not invent synonyms.
+    """
+    variants: list[str] = []
+
+    for raw_term in terms:
+        term = str(raw_term).strip()
+
+        if not term:
+            continue
+
+        if term not in variants:
+            variants.append(term)
+
+        # For multi-word terminology, also expose individual
+        # meaningful words as fallback search terms.
+        words = [
+            word.strip()
+            for word in term.split()
+            if word.strip()
+        ]
+
+        if len(words) > 1:
+            for word in words:
+                if len(word) >= 4 and word not in variants:
+                    variants.append(word)
+
+    return variants
+
+    However, I would **not actually use the individual words in the first version** if your Core terms are already good technical phrases. That can become too broad.
+    
+    So initially, use only the original terms:
+
+    def _build_core_search_expression(
+    core_terms: list[str],
+) -> str:
+    terms = [
+        str(term).strip()
+        for term in core_terms
+        if str(term).strip()
+    ]
+
+    if not terms:
+        return ""
+
+    return " OR ".join(
+        f'"{term}"' if " " in term else term
+        for term in terms
+    )
+
+Add a Core-only recall search
+This is the change I actually want you to implement first.
+Currently you have:
+Core + Function
+Core + Sensor
+Core + Function + Sensor
+
+Add:
+Core Only
+
+but treat it as a recall path, not a precision path.
+
+So the paths become:
+Path	Purpose
+Core Only	invention identity / recall
+Core + Function	invention + operation
+Core + Sensor	invention + mechanism
+Core + Function + Sensor	highly focused
+Sensor + Function	implementation discovery
+Sensor + Object + Function	secondary discovery
+
+
+This is important because if:
+
+Core = "some very distinctive technical arrangement"
+Function = "facial recognition"
+
+then:
+Core AND facial recognition
+
+may return zero even though the Core itself retrieves the relevant patent.
+Add:
+
+core_only = _combine_roles(
+    core_expr,
+)
+
+if core_only:
+    paths.append({
+        "name": "Core Only",
+        "expression": core_only,
+        "quality_level": "recall",
+        "recall_priority": "very_high",
+        "precision_priority": "medium",
+    })
+
+Put this before Core + Function.
+
+But there is an important safeguard
+We don't want:
+Core Only
+
+to flood your candidate set with hundreds/thousands of patents.
+So give this path a lower retrieval limit.
+If your path object supports it, add:
+
+{
+    "name": "Core Only",
+    "expression": core_only,
+    "quality_level": "recall",
+    "recall_priority": "very_high",
+    "precision_priority": "medium",
+    "limit": 25,
+}
+
+Then in the execution code:
+
+limit = path.get("limit", 100)
+
+results = search_patents_by_strategy(
+    expression,
+    limit=limit,
+)
+
+Change 3 — Preserve the path on every patent
+Make sure this is happening:
+for patent in results:    if path_name not in patent.search_paths:        patent.search_paths.append(path_name)
+
+
+This is now especially important because a patent found by:
+
+Core Only
+
+should later be considered differently from one found only through:
+Sensor + Function
+
+Change 4 — Fix the cosine display/diagnostic
+This is now the second bug I would investigate immediately.
+Your table says:
+US20220222465A1
+hybrid = 0.2445
+cosine = 0
+bm25 = 0.6191
+coverage = 1
+
+and:
+US20180307898A1
+hybrid = 0.1794
+cosine = 0
+bm25 = 0.5943
+coverage = 0.4072
+
+The fact that nearly every cosine value is exactly 0 is too suspicious.
+In ranking_service.py
+Find where you calculate cosine similarity.
+Immediately after it, add:
+logger.info(    "COSINE RAW | min=%.6f max=%.6f mean=%.6f",    float(np.min(cosine)),    float(np.max(cosine)),    float(np.mean(cosine)),)
+
+
+Then:
+for i in range(min(10, len(cosine))):    logger.info(        "COSINE RAW SAMPLE | %s = %.6f",        patents[i].patent_id,        float(cosine[i]),    )
+
+
+Then check the cosine filtering
+Immediately after your _apply_cosine_threshold() call:
+logger.info(    "COSINE FILTER | threshold=%.4f | passed=%d/%d",    float(threshold_used),    len(keep_indices),    len(patents),)
+
+
+What I expect we may discover
+There are three possibilities.
+A — Raw cosine is healthy
+For example:
+COSINE RAW
+min=0.18
+max=0.79
+mean=0.46
+
+Then the problem is probably mapping/formatting after ranking.
+B — Raw cosine is all zero
+min=0
+max=0
+mean=0
+
+Then we have an embedding/vector problem.
+C — Raw cosine is healthy but the final values become zero
+Then something in:
+cosine
+   ↓
+threshold
+   ↓
+keep_indices
+   ↓
+hybrid
+   ↓
+RankedPatent
+   ↓
+Streamlit
+
+is incorrectly transforming the value.
+Change 5 — Do not touch the ranking weights
+I strongly recommend not doing this yet:
+cosine_weight = 0.8bm25_weight = 0.2
+
+
+or:
+cosine_weight = 0.6bm25_weight = 0.4
+
+
+The current results don't justify changing those.
+First establish whether cosine actually works.
+Change 6 — Don't implement critical as a hard filter
+Also leave this alone:
+critical
+important
+supporting
+
+We eventually want:
+critical → stronger ranking influence
+important → moderate influence
+supporting → weaker influence
+
+not:
+critical → mandatory
+
+because your goal is explicitly to preserve recall.
+Expected next search structure
+After adding Core Only, you should get something like:
+Core Only                    ?
+Core + Function              0
+Core + Sensor                0
+Core + Function + Sensor     0
+Sensor + Function           16
+Sensor + Object + Function   1
+
+If Core Only also returns 0, then we have an extremely strong conclusion:
+The Core terminology generated by the AI is not searchable against the USPTO corpus.
+
+At that point I would change the AI decomposition/schema itself, rather than continuing to modify the Boolean search.
+If Core Only returns, say:
+Core Only = 8
+
+then we have found the missing candidate population.
+Those 8 patents can then be ranked together with the 17 implementation candidates:
+Core Only                       8
+Core + Function                 0
+Core + Sensor                   0
+Core + Function + Sensor        0
+Sensor + Function              16
+Sensor + Object + Function       1
+----------------------------------
+Raw                             25
+
+Then deduplication may produce something like:
+25 raw
+↓
+18 unique
+
+and now the embedding/ranking stage has a much healthier candidate corpus.
+One final observation
+Your current titles:
+CAMERA ASSEMBLY FOR A FACIAL RECOGNITION SYSTEM OF A MOTOR VEHICLE
+FACE IDENTIFICATION CAMERA MODULE
+FACIAL RECOGNITION SYSTEM...
+CAMERA FUNCTIONS USING FACIAL RECOGNITION
+VIDEO LIGHT SYSTEM... FACIAL RECOGNITION
+
+are not necessarily wrong patents.
+They are probably implementation-level prior art.
+That's actually useful.
+The system needs to distinguish:
+                 PRIOR ART
+                    │
+          ┌─────────┴─────────┐
+          │                   │
+  Invention identity     Implementation
+       evidence              evidence
+          │                   │
+      Core paths          Sensor paths
+          │                   │
+          └─────────┬─────────┘
+                    ↓
+                 Ranking
+
+So I would keep the 16 Sensor + Function results. We shouldn't throw them away.
+The immediate objective is simply to get Core-derived candidates into the same pool and fix/verify the cosine score. Once that happens, we can implement the critical / important / supporting soft weighting and search-path weighting properly.
+
+11. Add Core Only to build_search_paths_from_structure()
+In services/search_strategy_service.py, find:
+# Tier A — invention identity
+
+
+and replace that whole Tier A section with:
+# ---------------------------------------------------------
+# Tier A — invention identity
+# ---------------------------------------------------------
+
+# Core Only
+#
+# Recall-oriented path. This intentionally searches the
+# invention identity without requiring a sensor/function
+# term to also match.
+core_only = _combine_roles(core_expr)
+
+if core_only:
+    paths.append({
+        "name": "Core Only",
+        "expression": core_only,
+        "quality_level": "recall",
+        "recall_priority": "very_high",
+        "precision_priority": "medium",
+        "limit": 25,
+    })
+
+# Core + Function
+core_function = _combine_roles(
+    core_expr,
+    function_expr,
+)
+
+if core_function:
+    paths.append({
+        "name": "Core + Function",
+        "expression": core_function,
+        "quality_level": "broad",
+        "recall_priority": "high",
+        "precision_priority": "medium",
+    })
+
+# Core + Sensor
+core_sensor = _combine_roles(
+    core_expr,
+    sensor_expr,
+)
+
+if core_sensor:
+    paths.append({
+        "name": "Core + Sensor",
+        "expression": core_sensor,
+        "quality_level": "balanced",
+        "recall_priority": "medium",
+        "precision_priority": "high",
+    })
+
+# Core + Function + Sensor
+core_function_sensor = _combine_roles(
+    core_expr,
+    function_expr,
+    sensor_expr,
+)
+
+if core_function_sensor:
+    paths.append({
+        "name": "Core + Function + Sensor",
+        "expression": core_function_sensor,
+        "quality_level": "focused",
+        "recall_priority": "low",
+        "precision_priority": "high",
+    })
+
+Keep your existing Tier B paths:
+# ---------------------------------------------------------
+# Tier B — implementation discovery
+# ---------------------------------------------------------
+
+sensor_function = _combine_roles(
+    sensor_expr,
+    function_expr,
+)
+
+if sensor_function:
+    paths.append({
+        "name": "Sensor + Function",
+        "expression": sensor_function,
+        "quality_level": "broad",
+        "recall_priority": "high",
+        "precision_priority": "medium",
+    })
+
+sensor_object_function = _combine_roles(
+    sensor_expr,
+    object_expr,
+    function_expr,
+)
+
+if sensor_object_function:
+    paths.append({
+        "name": "Sensor + Object + Function",
+        "expression": sensor_object_function,
+        "quality_level": "focused",
+        "recall_priority": "medium",
+        "precision_priority": "high",
+    })
+
+Make sure the execution code honors limit
+Where you currently have:
+results = search_patents_by_strategy(    expression)
+
+
+change it to:
+path_limit = path.get("limit", 100)
+
+results = search_patents_by_strategy(
+    expression,
+    limit=path_limit,
+)
+
+Add a hard diagnostic immediately after path construction
+This is important because if Core Only still doesn't appear, we'll know the function being executed isn't the function we think it is.
+Immediately after:
+search_paths = build_search_paths_from_structure(
+    invention_structure
+)
+
+add:
+logger.info(
+    "GENERATED SEARCH PATHS:\n%s",
+    json.dumps(
+        search_paths,
+        indent=2,
+        ensure_ascii=False,
+    ),
+)
+
+And temporarily display it:
+with st.expander("Debug: Generated Search Paths"):
+    st.json(search_paths)
+
+Add the exact Core expression diagnostic
+Immediately before creating the paths:
+
+logger.info(
+    "ROLE EXPRESSIONS | core=%r | sensor=%r | function=%r | object=%r",
+    core_expr,
+    sensor_expr,
+    function_expr,
+    object_expr,
+)
+
+Please add this exact diagnostic to ranking_service.py.
+Immediately after cosine calculation:
+
+logger.info(
+    "COSINE RAW | min=%.6f | max=%.6f | mean=%.6f",
+    float(np.min(cosine)),
+    float(np.max(cosine)),
+    float(np.mean(cosine)),
+)
+
+Then:
+
+for i in range(min(10, len(cosine))):
+    logger.info(
+        "COSINE RAW SAMPLE | patent=%s | value=%.6f",
+        patents[i].patent_id,
+        float(cosine[i]),
+    )
+
+Then after filtering:
+
+logger.info(
+    "COSINE FILTER | threshold=%.6f | passed=%d/%d",
+    float(threshold_used),
+    len(keep_indices),
+    len(patents),
+)
+
+12. Replace the entire path-generation function
+In services/search_strategy_service.py, find:
+def build_search_paths_from_structure(...)
+
+Rather than adding another small block somewhere, replace the function with this structure.
+Keep your existing _build_role_expression() implementation.
+
+def _combine_roles(*expressions: str) -> str:
+    """
+    Combine non-empty role expressions using AND.
+
+    Each role expression remains grouped so that OR terms inside
+    a role do not alter the intended Boolean structure.
+    """
+    parts = [
+        expression.strip()
+        for expression in expressions
+        if expression and expression.strip()
+    ]
+
+    return " AND ".join(
+        f"({part})"
+        for part in parts
+    )
+
+
+def build_search_paths_from_structure(
+    structure: dict,
+) -> list[dict]:
+    """
+    Build deterministic patent search paths from the AI invention
+    structure.
+
+    Core paths represent invention identity.
+    Sensor/function paths provide implementation-level recall.
+    """
+
+    core_expr = _build_role_expression(
+        structure.get("core_system", [])
+    )
+
+    sensor_expr = _build_role_expression(
+        structure.get("sensors", [])
+    )
+
+    function_expr = _build_role_expression(
+        structure.get("functions", [])
+    )
+
+    object_expr = _build_role_expression(
+        structure.get("objects", [])
+    )
+
+    logger.info(
+        "SEARCH ROLE EXPRESSIONS | "
+        "core=%r | sensor=%r | function=%r | object=%r",
+        core_expr,
+        sensor_expr,
+        function_expr,
+        object_expr,
+    )
+
+    paths: list[dict] = []
+
+    # =========================================================
+    # TIER A — INVENTION IDENTITY
+    # =========================================================
+
+    # 1. Core Only
+    #
+    # Recall-oriented search. This is intentionally independent
+    # of sensor/function terminology.
+    if core_expr:
+        paths.append({
+            "name": "Core Only",
+            "expression": core_expr,
+            "quality_level": "recall",
+            "recall_priority": "very_high",
+            "precision_priority": "medium",
+            "limit": 25,
+        })
+
+    # 2. Core + Function
+    expression = _combine_roles(
+        core_expr,
+        function_expr,
+    )
+
+    if expression:
+        paths.append({
+            "name": "Core + Function",
+            "expression": expression,
+            "quality_level": "broad",
+            "recall_priority": "high",
+            "precision_priority": "medium",
+            "limit": 100,
+        })
+
+    # 3. Core + Sensor
+    expression = _combine_roles(
+        core_expr,
+        sensor_expr,
+    )
+
+    if expression:
+        paths.append({
+            "name": "Core + Sensor",
+            "expression": expression,
+            "quality_level": "balanced",
+            "recall_priority": "medium",
+            "precision_priority": "high",
+            "limit": 100,
+        })
+
+    # 4. Core + Function + Sensor
+    expression = _combine_roles(
+        core_expr,
+        function_expr,
+        sensor_expr,
+    )
+
+    if expression:
+        paths.append({
+            "name": "Core + Function + Sensor",
+            "expression": expression,
+            "quality_level": "focused",
+            "recall_priority": "low",
+            "precision_priority": "high",
+            "limit": 100,
+        })
+
+    # =========================================================
+    # TIER B — IMPLEMENTATION DISCOVERY
+    # =========================================================
+
+    # 5. Sensor + Function
+    expression = _combine_roles(
+        sensor_expr,
+        function_expr,
+    )
+
+    if expression:
+        paths.append({
+            "name": "Sensor + Function",
+            "expression": expression,
+            "quality_level": "broad",
+            "recall_priority": "high",
+            "precision_priority": "medium",
+            "limit": 100,
+        })
+
+    # 6. Sensor + Object + Function
+    expression = _combine_roles(
+        sensor_expr,
+        object_expr,
+        function_expr,
+    )
+
+    if expression:
+        paths.append({
+            "name": "Sensor + Object + Function",
+            "expression": expression,
+            "quality_level": "focused",
+            "recall_priority": "medium",
+            "precision_priority": "high",
+            "limit": 100,
+        })
+
+    logger.info(
+        "GENERATED SEARCH PATHS: %s",
+        [path["name"] for path in paths],
+    )
+
+    return paths
+
+Make sure the search loop actually executes all generated paths
+Find the code that currently does something like:
+for path in ai_approved_search_paths:
+
+
+or:
+
+for path in search_paths:
+
+It should be:
+for path in search_paths:
+    path_name = path["name"]
+    expression = path["expression"]
+    path_limit = path.get("limit", 100)
+
+    logger.info(
+        "USPTO SEARCH | path=%s | query=%s | limit=%d",
+        path_name,
+        expression,
+        path_limit,
+    )
+
+    results = search_patents_by_strategy(
+        expression,
+        limit=path_limit,
+    )
+
+    logger.info(
+        "USPTO RESULT | path=%s | count=%d",
+        path_name,
+        len(results),
+    )
+
+    for patent in results:
+        if path_name not in patent.search_paths:
+            patent.search_paths.append(path_name)
+
+    all_results.extend(results)
+
+Check the Streamlit performance table
+There is another possibility.
+Your search engine may actually execute Core Only, but your UI may only display the original five paths.
+If you have code like:
+
+expected_paths = [
+    "Sensor + Function",
+    "Core + Function",
+    "Core + Sensor",
+    "Core + Function + Sensor",
+    "Sensor + Object + Function",
+]
+
+change it to:
+expected_paths = [
+    "Core Only",
+    "Core + Function",
+    "Core + Sensor",
+    "Core + Function + Sensor",
+    "Sensor + Function",
+    "Sensor + Object + Function",
+]
+
+Better still, don't hard-code the paths at all.
+Build the table from:
+st.session_state.ai_search_path_results
+
+
+For example:
+
+path_results = st.session_state.get(
+    "ai_search_path_results",
+    []
+)
+
+for result in path_results:
+    ...
+
+Add this temporary Streamlit diagnostic
+Immediately after the paths are generated:
+with st.expander("DEBUG — Generated Search Paths"):    st.json(search_paths)
+
+
+You should literally see:
+Core Only
+Core + Function
+Core + Sensor
+Core + Function + Sensor
+Sensor + Function
+Sensor + Object + Function
+
+This is the fastest way to determine whether we're dealing with:
+Builder problem
+      OR
+Execution problem
+      OR
+UI problem
+
+One thing I want you to check about core_expr
+The other critical diagnostic is:
+
+logger.info(
+    "SEARCH ROLE EXPRESSIONS | core=%r | sensor=%r | function=%r | object=%r",
+    core_expr,
+    sensor_expr,
+    function_expr,
+    object_expr,
+)
+
+If you get:
+core=''
+
+then Core Only will not be generated because there is nothing to search.
+If you get:
+core='("some technical arrangement")'
+
+then Core Only should definitely be generated.
+
+add this exact diagnostic in ranking_service.py after the cosine calculation:
+logger.info(
+    "COSINE RAW | min=%.6f | max=%.6f | mean=%.6f",
+    float(np.min(cosine)),
+    float(np.max(cosine)),
+    float(np.mean(cosine)),
+)
+
+for i in range(min(10, len(cosine))):
+    logger.info(
+        "COSINE RAW SAMPLE | patent=%s | value=%.6f",
+        patents[i].patent_id,
+        float(cosine[i]),
+    )
+
+Then after cosine filtering:
+logger.info(
+    "COSINE FILTER | threshold=%.6f | passed=%d/%d",
+    float(threshold_used),
+    len(keep_indices),
+    len(patents),
+)
+

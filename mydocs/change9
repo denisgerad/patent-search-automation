@@ -1,0 +1,218 @@
+I recommend changing the architecture now
+Instead of:
+AI Core terms
+      ↓
+USPTO Boolean
+      ↓
+Core candidates
+
+use:
+AI invention structure
+      ↓
+USPTO lexical search using searchable technical concepts
+      ↓
+large recall corpus
+      ↓
+embeddings
+      ↓
+Core semantic relevance
+      ↓
+ranking
+
+In other words, Core should become primarily a semantic-ranking concept, not a mandatory USPTO lexical retrieval concept.
+This is much better for your stated goal of balancing recall and precision.
+1. Keep the Sensor paths
+Do not remove:
+Sensor + Function
+Sensor + Object + Function
+
+They are currently your successful recall mechanisms.
+Keep:
+paths.append({    "name": "Sensor + Function",    ...})paths.append({    "name": "Sensor + Object + Function",    ...})
+
+
+2. Stop using Core-only USPTO searches as a requirement
+I would remove these from the actual USPTO candidate-generation stage:
+Core Only
+Core + Function
+Core + Sensor
+Core + Function + Sensor
+
+Do not delete the concepts.
+Instead, retain them in the invention structure.
+For example:
+core_terms = structure.get("core_system", [])
+
+
+These become ranking metadata.
+3. Add Core metadata to the candidate ranking
+Your PatentRecord already has:
+search_paths: list[str]
+
+
+Add:
+core_relevance: float | None = None
+
+
+Actually, I would call it:
+semantic_core_score: float | None = None
+
+
+So:
+class PatentRecord(BaseModel):    patent_id: str    patent_title: str    patent_abstract: str | None = None    patent_type: str | None = None    patent_date: str | None = None    continuity_family_id: str | None = None    uspc_class: str | None = None    uspc_subclass: str | None = None    cpc_classifications: list[str] = Field(default_factory=list)    ipc_classifications: list[str] = Field(default_factory=list)    search_paths: list[str] = Field(default_factory=list)    semantic_core_score: float | None = None
+
+
+4. Embed the Core concepts separately
+You already have:
+embed_query(...)embed_patents(...)
+
+
+We can use the same embedding model.
+Suppose Claude produces:
+core_terms = [    "distinctive technical arrangement",    "coordinated sensing mechanism",    "specific processing relationship",]
+
+
+Create one embedding for each:
+core_embeddings = [    embed_query(term, em)    for term in core_terms]
+
+
+Then compare every patent embedding against those Core embeddings.
+Conceptually:
+                    Core 1 ──────┐
+                    Core 2 ──────┼──→ maximum similarity
+                    Core 3 ──────┘
+                                  │
+Patent embedding ────────────────→ Core score
+
+Use the maximum rather than the average initially:
+semantic_core_score = max(    cosine_similarity(patent_embedding, core_embedding))
+
+
+Why maximum?
+Because a patent may strongly match one important Core concept without matching every Core phrase.
+5. Add a Core semantic scoring function
+In services/ranking_service.py or a small semantic scoring service:
+import numpy as npdef compute_core_semantic_scores(    patent_vectors: np.ndarray,    core_vectors: np.ndarray,) -> np.ndarray:    """    Compute the strongest semantic similarity between each patent    and any Core invention concept.    """    if len(patent_vectors) == 0:        return np.array([], dtype=float)    if len(core_vectors) == 0:        return np.zeros(len(patent_vectors), dtype=float)    # Normalize vectors    patent_norms = np.linalg.norm(        patent_vectors,        axis=1,        keepdims=True,    )    core_norms = np.linalg.norm(        core_vectors,        axis=1,        keepdims=True,    )    patent_norms = np.maximum(patent_norms, 1e-12)    core_norms = np.maximum(core_norms, 1e-12)    patents_normalized = patent_vectors / patent_norms    core_normalized = core_vectors / core_norms
+
+
+This is deliberately simple.
+Don't introduce complicated weighting yet.
+6. But there is a critical issue with your existing cosine
+Before implementing this, we need to resolve something you've repeatedly shown:
+Cosine = 0
+
+If your normal patent/query cosine is also genuinely zero, then we shouldn't build Core scoring on the same broken vector calculation.
+So first run this simple diagnostic.
+In your embedding/ranking code:
+logger.info(    "PATENT VECTOR SHAPE: %s",    doc_vecs.shape,)logger.info(    "QUERY VECTOR SHAPE: %s",    query_vec.shape,)logger.info(    "PATENT VECTOR NORM: min=%.6f max=%.6f mean=%.6f",    float(np.linalg.norm(doc_vecs, axis=1).min()),    float(np.linalg.norm(doc_vecs, axis=1).max()),    float(np.linalg.norm(doc_vecs, axis=1).mean()),)logger.info(    "QUERY VECTOR NORM: %.6f",    float(np.linalg.norm(query_vec)),)
+
+
+We need:
+PATENT VECTOR NORM:
+min > 0
+max > 0
+
+QUERY VECTOR NORM:
+> 0
+
+If the norms are zero, stop here. The embedding pipeline is broken.
+If the norms are healthy, then calculate:
+raw_cosine = (    doc_vecs @ query_vec)
+
+
+after normalization, and log:
+logger.info(    "RAW COSINE: min=%.6f max=%.6f mean=%.6f",    float(raw_cosine.min()),    float(raw_cosine.max()),    float(raw_cosine.mean()),)
+
+
+7. There is a potentially bigger issue in your current pipeline
+Your current _run_rank() is:
+doc_vecs = embed_patents(patents, em)expanded = st.session_state.get("expanded_queries", None)query_vec = embed_query(    q,    em,    expanded=expanded,)meta = st.session_state.get("expansion_metadata", {})tokens = meta.get("tokens")critical = list(dict.fromkeys(    meta.get("critical_tokens", [])    + meta.get("patent_synonyms", [])))return rank(    query=q,    patents=patents,    doc_vecs=doc_vecs,    query_vec=query_vec,    top_k=k,    critical_tokens=critical or None,    tokens=tokens,)
+
+
+The important question is:
+What exactly is embed_query() returning?
+Because if the query vector is malformed, normalized incorrectly, or converted to an unexpected shape, your entire semantic ranking is compromised.
+8. I would therefore change the development sequence
+We have learned enough to simplify the architecture.
+Current
+Core
+ ↓
+USPTO Boolean
+ ↓
+0
+
+Don't fight that anymore.
+New
+             AI invention structure
+                       │
+        ┌──────────────┴──────────────┐
+        │                             │
+   searchable                    semantic
+   implementation                invention
+   concepts                      concepts
+        │                             │
+        ↓                             ↓
+     USPTO                       embeddings
+        │                             │
+        └──────────────┬──────────────┘
+                       ↓
+                  candidate pool
+                       ↓
+                    dedup
+                       ↓
+                 hybrid ranking
+                       ↓
+              Core semantic score
+
+This is a much more robust patent-search architecture.
+9. What happens to Core + Function etc.?
+Don't throw the information away.
+Instead of using them as separate USPTO searches, use them as semantic concepts.
+For example:
+search_concepts = {    "core": core_terms,    "functions": function_terms,    "sensors": sensor_terms,    "objects": object_terms,}
+
+
+Then calculate:
+Core semantic score
+Function semantic score
+Sensor semantic score
+Object semantic score
+
+Eventually:
+final_score =
+    0.45 * core_score
+  + 0.25 * function_score
+  + 0.15 * sensor_score
+  + 0.15 * bm25_score
+
+But don't implement those weights yet.
+First establish that the embeddings work.
+10. This also solves your original critical / important / supporting requirement
+Once semantic concept scoring is working, importance becomes natural:
+importance_weight = {    "critical": 1.00,    "important": 0.70,    "supporting": 0.40,}
+
+
+Then:
+Core critical concept
+        ↓
+high semantic contribution
+
+Core important concept
+        ↓
+medium contribution
+
+Supporting concept
+        ↓
+low contribution
+
+That is much better than making critical a Boolean search requirement.
+What I recommend you do right now
+Don't make the larger semantic-ranking implementation yet.
+Run this diagnostic first:
+logger.info(    "PATENT VECTOR SHAPE: %s",    doc_vecs.shape,)logger.info(    "QUERY VECTOR SHAPE: %s",    query_vec.shape,)logger.info(    "PATENT VECTOR NORM: min=%.6f max=%.6f mean=%.6f",    float(np.linalg.norm(doc_vecs, axis=1).min()),    float(np.linalg.norm(doc_vecs, axis=1).max()),    float(np.linalg.norm(doc_vecs, axis=1).mean()),)logger.info(    "QUERY VECTOR NORM: %.6f",    float(np.linalg.norm(query_vec)),)
+
+
+Then calculate/log the raw cosine.
+Because if the vectors are healthy, we can now confidently redesign Core as a semantic ranking signal.
+If the vectors are not healthy, we have found the real problem—and we should fix that before touching search strategy or ranking.
+At this point, I would not make any more changes to the USPTO Core search paths. The Core Only = 0 experiment has answered that question. The next layer to validate is the embedding pipeline.

@@ -17,5 +17,8 @@ def test_generate_invention_structure_uses_generate_api():
     assert result["sensors"] == ["camera"]
     assert result["functions"] == ["detect"]
     assert result["objects"] == ["pedestrian"]
-    assert result["search_paths"][0]["name"] == "Sensor + Function"
+    assert {path["name"] for path in result["search_paths"]} >= {
+        "Core Only",
+        "Sensor + Function",
+    }
     client.generate.assert_called_once()

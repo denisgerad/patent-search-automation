@@ -190,6 +190,175 @@ def _apply_token_anchor_penalty(
     return scores
 
 
+def _importance_weight(importance: str) -> float:
+    """Convert SearchConcept importance into a ranking weight."""
+
+    return {
+        "critical": 5.0,
+        "important": 3.0,
+        "supporting": 1.0,
+    }.get(
+        str(importance).strip().lower(),
+        1.0,
+    )
+
+
+def _calculate_importance_score(
+    patent: PatentRecord,
+    search_strategy=None,
+) -> tuple[float, dict[str, bool]]:
+    """Calculate weighted concept coverage using the approved Search Strategy."""
+
+    if search_strategy is None:
+        return 0.0, {}
+
+    concepts = getattr(
+        search_strategy,
+        "concepts",
+        [],
+    )
+
+    if not concepts:
+        return 0.0, {}
+
+    text_parts = [
+        patent.patent_title or "",
+        patent.patent_abstract or "",
+    ]
+
+    if getattr(
+        patent,
+        "patent_claims",
+        None,
+    ):
+        text_parts.append(
+            patent.patent_claims or ""
+        )
+
+    text = " ".join(text_parts).lower()
+
+    total_weight = 0.0
+    matched_weight = 0.0
+    concept_hits: dict[str, bool] = {}
+
+    for concept in concepts:
+        name = str(
+            getattr(concept, "name", "")
+        ).strip()
+
+        terms = [
+            str(term).strip().lower()
+            for term in getattr(
+                concept,
+                "terms",
+                [],
+            )
+            if str(term).strip()
+        ]
+
+        if not name or not terms:
+            continue
+
+        weight = _importance_weight(
+            getattr(
+                concept,
+                "importance",
+                "supporting",
+            )
+        )
+
+        total_weight += weight
+
+        operator = str(
+            getattr(
+                concept,
+                "operator",
+                "OR",
+            )
+        ).strip().upper()
+
+        if operator == "AND":
+            matched = all(
+                term in text
+                for term in terms
+            )
+        else:
+            matched = any(
+                term in text
+                for term in terms
+            )
+
+        concept_hits[name] = matched
+
+        if matched:
+            matched_weight += weight
+
+    if total_weight <= 0:
+        return 0.0, concept_hits
+
+    return (
+        matched_weight / total_weight,
+        concept_hits,
+    )
+
+
+def _apply_importance_score(
+    hybrid: float,
+    importance_score: float,
+    importance_hits: dict[str, bool],
+    search_strategy=None,
+) -> float:
+    """Apply importance-aware relevance as a soft ranking adjustment."""
+
+    if search_strategy is None:
+        return hybrid
+
+    concepts = getattr(
+        search_strategy,
+        "concepts",
+        [],
+    )
+
+    if not concepts:
+        return hybrid
+
+    critical_concepts = [
+        concept
+        for concept in concepts
+        if str(
+            getattr(
+                concept,
+                "importance",
+                "",
+            )
+        ).lower() == "critical"
+    ]
+
+    critical_missing = any(
+        not importance_hits.get(
+            str(
+                getattr(
+                    concept,
+                    "name",
+                    "",
+                )
+            ).strip(),
+            False,
+        )
+        for concept in critical_concepts
+    )
+
+    multiplier = (
+        0.60
+        + (0.40 * importance_score)
+    )
+
+    if critical_missing:
+        multiplier *= 0.75
+
+    return hybrid * multiplier
+
+
 def rank(
     query: str,
     patents: list[PatentRecord],
@@ -198,6 +367,7 @@ def rank(
     top_k: int | None = None,
     critical_tokens: list[str] | None = None,
     tokens=None,
+    search_strategy=None,
 ) -> list[RankedPatent]:
     """
     Rank *patents* using hybrid cosine + BM25 scoring.
@@ -309,7 +479,41 @@ def rank(
             for _ in patents_f
         ]
 
-    # 4c. Dynamic threshold as a quality signal.
+    # ---------------------------------------------------------------
+    # 4c. Importance-aware Search Strategy scoring
+    # ---------------------------------------------------------------
+    importance_scores = np.zeros(
+        len(patents_f),
+        dtype=float,
+    )
+    importance_hits_list: list[dict] = []
+
+    for i, patent in enumerate(patents_f):
+        importance_score, importance_hits = (
+            _calculate_importance_score(
+                patent,
+                search_strategy,
+            )
+        )
+
+        importance_scores[i] = importance_score
+        importance_hits_list.append(importance_hits)
+
+        hybrid[i] = _apply_importance_score(
+            float(hybrid[i]),
+            importance_score,
+            importance_hits,
+            search_strategy,
+        )
+
+        logger.debug(
+            "Importance scoring: patent=%s importance=%.3f hits=%s",
+            patent.patent_id,
+            importance_score,
+            importance_hits,
+        )
+
+    # 4d. Dynamic threshold as a quality signal.
     #
     # The elbow threshold identifies the strongest group of candidates.
     # However, it must not prevent top_k results from being returned when
@@ -366,6 +570,11 @@ def rank(
         coverage_all[i]
         for i in passed
     ]
+    importance_selected = importance_scores[passed]
+    importance_hits_selected = [
+        importance_hits_list[int(i)]
+        for i in passed
+    ]
 
     # 5. Sort by hybrid score and select top-k distinct continuity families.
     #
@@ -399,13 +608,23 @@ def rank(
         ranked.append(
             RankedPatent(
                 patent=patent,
-                cosine_score=float(cosine_selected[i]),
-                bm25_score=float(bm25_selected[i]),
-                hybrid_score=float(hybrid_selected[i]),
+                cosine_score=float(
+                    cosine_selected[i]
+                ),
+                bm25_score=float(
+                    bm25_selected[i]
+                ),
+                hybrid_score=float(
+                    hybrid_selected[i]
+                ),
                 coverage=float(
                     coverage_selected[i]["coverage"]
                 ),
                 concept_hits=coverage_selected[i]["concept_hits"],
+                importance_score=float(
+                    importance_selected[i]
+                ),
+                importance_hits=importance_hits_selected[i],
             )
         )
 
@@ -451,6 +670,10 @@ def rank(
                         coverage_all[original_i]["coverage"]
                     ),
                     concept_hits=coverage_all[original_i]["concept_hits"],
+                    importance_score=float(
+                        importance_scores[original_i]
+                    ),
+                    importance_hits=importance_hits_list[original_i],
                 )
             )
 

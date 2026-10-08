@@ -20,6 +20,7 @@ class PatentRecord(BaseModel):
     patent_type: Optional[str] = None
     patent_date: Optional[str] = None
     continuity_family_id: Optional[str] = None
+    search_paths: list[str] = Field(default_factory=list)
 
     # USPTO classification data.
     uspc_class: Optional[str] = None
@@ -90,6 +91,10 @@ class RankedPatent(BaseModel):
     hybrid_score: float
     coverage: float = 0.0
     concept_hits: dict = Field(default_factory=dict)
+
+    # Importance-aware relevance
+    importance_score: float = 0.0
+    importance_hits: dict = Field(default_factory=dict)
 
 
 class PipelineResult(BaseModel):

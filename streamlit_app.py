@@ -597,6 +597,25 @@ if _structure:
                     "purpose": str(
                         _path.get("purpose", "")
                     ).strip(),
+                    # Search-quality metadata
+                    "quality_level": str(
+                        _path.get(
+                            "quality_level",
+                            "balanced",
+                        )
+                    ).strip(),
+                    "recall_priority": int(
+                        _path.get(
+                            "recall_priority",
+                            0,
+                        )
+                    ),
+                    "precision_priority": int(
+                        _path.get(
+                            "precision_priority",
+                            0,
+                        )
+                    ),
                 }
             )
 
@@ -884,9 +903,41 @@ with st.expander("Build Search Strategy", expanded=True):
                         f"**{_path['name']}**"
                     )
 
+                    _quality = _path.get(
+                        "quality_level",
+                        "balanced",
+                    )
+
+                    _quality_label = {
+                        "broad": "🟢 Broad / High Recall",
+                        "balanced": "🟡 Balanced",
+                        "focused": "🔴 Focused / High Precision",
+                    }.get(
+                        _quality,
+                        "🟡 Balanced",
+                    )
+
+                    st.caption(
+                        f"{_quality_label}"
+                    )
+
                     if _path.get("purpose"):
                         st.caption(
                             _path["purpose"]
+                        )
+
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.metric(
+                            "Recall priority",
+                            _path.get("recall_priority", 0),
+                        )
+
+                    with col2:
+                        st.metric(
+                            "Precision priority",
+                            _path.get("precision_priority", 0),
                         )
 
                     st.code(
@@ -1215,6 +1266,8 @@ def _run_search(queries: list[str]) -> tuple[list, list]:
         )
 
         raw = []
+        path_results = []
+        path_provenance = []
 
         for path in approved_paths:
             expression = str(path.get("expression", "")).strip()
@@ -1222,9 +1275,11 @@ def _run_search(queries: list[str]) -> tuple[list, list]:
             if not expression:
                 continue
 
+            path_name = path.get("name", "Unnamed path")
+
             logger.info(
                 "AI PATH QUERY [%s]: %s",
-                path.get("name", ""),
+                path_name,
                 expression,
             )
 
@@ -1234,19 +1289,56 @@ def _run_search(queries: list[str]) -> tuple[list, list]:
                 offset=0,
             )
 
+            path_results.append(
+                {
+                    "name": path_name,
+                    "quality_level": path.get(
+                        "quality_level",
+                        "balanced",
+                    ),
+                    "recall_priority": path.get(
+                        "recall_priority",
+                        0,
+                    ),
+                    "precision_priority": path.get(
+                        "precision_priority",
+                        0,
+                    ),
+                    "count": len(results),
+                }
+            )
+
+            for patent in results:
+                if patent is None:
+                    continue
+
+                existing_paths = list(getattr(patent, "search_paths", []) or [])
+                if path_name not in existing_paths:
+                    patent.search_paths = existing_paths + [path_name]
+
+                path_provenance.append(
+                    {
+                        "patent": patent,
+                        "path": path_name,
+                    }
+                )
+
+                raw.append(patent)
+
             logger.info(
                 "AI Invention Structure path '%s' query: %s",
-                path.get("name", ""),
+                path_name,
                 expression,
             )
 
             logger.info(
                 "AI Invention Structure path '%s' returned %d results",
-                path.get("name", ""),
+                path_name,
                 len(results),
             )
 
-            raw.extend(results)
+        st.session_state.ai_search_path_results = path_results
+        st.session_state.ai_search_path_provenance = path_provenance
 
         unique = deduplicate(raw)
         return raw, unique
@@ -1371,9 +1463,17 @@ def _run_rank(q: str, patents: list, k: int) -> list:
     critical = list(dict.fromkeys(
         meta.get("critical_tokens", []) + meta.get("patent_synonyms", [])
     ))
-    return rank(query=q, patents=patents, doc_vecs=doc_vecs,
-                query_vec=query_vec, top_k=k, critical_tokens=critical or None,
-                tokens=tokens)
+    search_strategy = st.session_state.get("search_strategy")
+    return rank(
+        query=q,
+        patents=patents,
+        doc_vecs=doc_vecs,
+        query_vec=query_vec,
+        top_k=k,
+        critical_tokens=critical or None,
+        tokens=tokens,
+        search_strategy=search_strategy,
+    )
 
 
 def _run_search_json(schema) -> tuple[list, list]:
@@ -1796,6 +1896,42 @@ with tab_search:
         m1.metric("Raw fetched",  raw_count)
         m2.metric("After dedup",  unique_count)
         m3.metric("Duplicates removed", dupes)
+
+        _path_results = st.session_state.get(
+            "ai_search_path_results",
+            [],
+        )
+
+        if _path_results:
+            st.markdown("### Search Structure Performance")
+
+            _path_df = pd.DataFrame(
+                _path_results
+            )
+
+            _path_df = _path_df[
+                [
+                    "name",
+                    "quality_level",
+                    "count",
+                    "recall_priority",
+                    "precision_priority",
+                ]
+            ]
+
+            _path_df.columns = [
+                "Search Path",
+                "Mode",
+                "Raw Results",
+                "Recall Priority",
+                "Precision Priority",
+            ]
+
+            st.dataframe(
+                _path_df,
+                use_container_width=True,
+                hide_index=True,
+            )
 
         st.divider()
         rows = [
@@ -2919,14 +3055,23 @@ with tab_rank:
         rows = []
         for i, rp in enumerate(st.session_state.ranked, 1):
             rows.append({
-                "#":            i,
-                "patent_id":    rp.patent.patent_id,
-                "title":        "\n".join(textwrap.wrap(rp.patent.patent_title or "", width=80)),
-                "type":         rp.patent.patent_type  or "—",
-                "date":         rp.patent.patent_date  or "—",
-                "hybrid":       round(rp.hybrid_score,  4),
-                "cosine":       round(rp.cosine_score,  4),
-                "bm25":         round(rp.bm25_score,    4),
+                "#": i,
+                "patent_id": rp.patent.patent_id,
+                "title": "\n".join(textwrap.wrap(rp.patent.patent_title or "", width=80)),
+                "type": rp.patent.patent_type or "—",
+                "date": rp.patent.patent_date or "—",
+                "hybrid": round(rp.hybrid_score, 4),
+                "importance": round(rp.importance_score, 4),
+                "cosine": round(rp.cosine_score, 4),
+                "bm25": round(rp.bm25_score, 4),
+                "concept_coverage": (
+                    ", ".join(
+                        name
+                        for name, hit in rp.importance_hits.items()
+                        if hit
+                    )
+                    or "—"
+                ),
             })
 
         df = pd.DataFrame(rows)
@@ -2957,8 +3102,9 @@ with tab_rank:
         st.subheader("Score distribution")
         chart_df = pd.DataFrame({
             "hybrid": [r["hybrid"] for r in rows],
+            "importance": [r["importance"] for r in rows],
             "cosine": [r["cosine"] for r in rows],
-            "bm25":   [r["bm25"]   for r in rows],
+            "bm25": [r["bm25"] for r in rows],
         })
         st.bar_chart(chart_df)
 
@@ -2984,8 +3130,20 @@ with tab_rank:
                 st.caption("🔴 No group terms matched in this patent's title or abstract.")
         st.markdown(f"**Type:** {p.patent_type or '—'}   **Date:** {p.patent_date or '—'}")
         st.markdown(f"**Hybrid:** `{rp.hybrid_score:.4f}`  |  "
+                    f"**Importance:** `{rp.importance_score:.4f}`  |  "
                     f"**Cosine:** `{rp.cosine_score:.4f}`  |  "
                     f"**BM25:** `{rp.bm25_score:.4f}`")
+
+        if rp.importance_hits:
+            st.markdown(
+                "**Concept coverage:** "
+                + ", ".join(
+                    name
+                    for name, hit in rp.importance_hits.items()
+                    if hit
+                )
+                or "—"
+            )
         if p.patent_abstract:
             with st.expander("Abstract"):
                 st.write(p.patent_abstract)

@@ -233,12 +233,34 @@ def _role_expression(
     return "(" + " OR ".join(cleaned) + ")"
 
 
+def _combine_roles(*expressions: str) -> str:
+    """Combine role expressions in a compact, explicit Boolean form."""
+
+    parts = [
+        expression.strip()
+        for expression in expressions
+        if expression and expression.strip()
+    ]
+
+    if not parts:
+        return ""
+
+    return " AND ".join(f"({part})" for part in parts)
+
+
 def build_search_paths_from_structure(
     structure: dict,
 ) -> list[dict]:
     """
-    Build deterministic search paths from the reviewed invention
-    structure.
+    Build deterministic search paths from the reviewed invention structure.
+
+    Each path represents a different point on the recall/precision spectrum.
+
+    Recall:
+        More general role combinations.
+
+    Precision:
+        More invention-specific role combinations.
 
     The user's edited terminology is authoritative.
     """
@@ -286,61 +308,112 @@ def build_search_paths_from_structure(
 
     paths = []
 
-    # 1. Core + Function
+    # ------------------------------------------------------------------
+    # 1. CORE + FUNCTION
+    # ------------------------------------------------------------------
+    # Broad invention-identity search.
+    #
+    # Purpose:
+    #   High recall.
+    #
+    # This should normally retrieve a relatively large corpus.
+    # ------------------------------------------------------------------
+
     if core_expr and function_expr:
         paths.append(
             {
                 "name": "Core + Function",
-                "roles": ["core_system", "functions"],
-                "expression": (
-                    f"{core_expr}\n"
-                    "AND\n"
-                    f"{function_expr}"
-                ),
+                "roles": [
+                    "core_system",
+                    "functions",
+                ],
+                "quality_level": "broad",
+                "recall_priority": 5,
+                "precision_priority": 2,
                 "purpose": (
-                    "Search the core application/system together with its "
-                    "primary functions."
+                    "Broad search connecting the core system with "
+                    "its primary functions."
+                ),
+                "expression": _combine_roles(
+                    core_expr,
+                    function_expr,
                 ),
             }
         )
 
-    # 2. Sensor + Function
+    # ------------------------------------------------------------------
+    # 2. SENSOR + FUNCTION
+    # ------------------------------------------------------------------
+    # Technical search.
+    #
+    # Purpose:
+    #   Good recall of patents using different system terminology
+    #   but describing similar technical behaviour.
+    # ------------------------------------------------------------------
+
     if sensor_expr and function_expr:
         paths.append(
             {
                 "name": "Sensor + Function",
-                "roles": ["sensors", "functions"],
-                "expression": (
-                    f"{sensor_expr}\n"
-                    "AND\n"
-                    f"{function_expr}"
-                ),
+                "roles": [
+                    "sensors",
+                    "functions",
+                ],
+                "quality_level": "broad",
+                "recall_priority": 4,
+                "precision_priority": 4,
                 "purpose": (
-                    "Search the sensing technology together with the "
-                    "functions it performs."
+                    "Search the sensing technology together with "
+                    "the functions it performs."
+                ),
+                "expression": _combine_roles(
+                    sensor_expr,
+                    function_expr,
                 ),
             }
         )
 
-    # 3. Core + Sensor
+    # ------------------------------------------------------------------
+    # 3. CORE + SENSOR
+    # ------------------------------------------------------------------
+    # Architecture-oriented search.
+    #
+    # Purpose:
+    #   Find documents describing a similar technical architecture.
+    # ------------------------------------------------------------------
+
     if core_expr and sensor_expr:
         paths.append(
             {
                 "name": "Core + Sensor",
-                "roles": ["core_system", "sensors"],
-                "expression": (
-                    f"{core_expr}\n"
-                    "AND\n"
-                    f"{sensor_expr}"
-                ),
+                "roles": [
+                    "core_system",
+                    "sensors",
+                ],
+                "quality_level": "balanced",
+                "recall_priority": 3,
+                "precision_priority": 6,
                 "purpose": (
-                    "Search the application/core system together with "
-                    "its sensing technology."
+                    "Search for the core system together with "
+                    "the sensing architecture."
+                ),
+                "expression": _combine_roles(
+                    core_expr,
+                    sensor_expr,
                 ),
             }
         )
 
-    # 4. Core + Function + Sensor
+    # ------------------------------------------------------------------
+    # 4. CORE + FUNCTION + SENSOR
+    # ------------------------------------------------------------------
+    # High precision search.
+    #
+    # Purpose:
+    #   Strongest combination of invention identity, behaviour,
+    #   and technical mechanism.
+    # ------------------------------------------------------------------
+
     if core_expr and function_expr and sensor_expr:
         paths.append(
             {
@@ -350,6 +423,13 @@ def build_search_paths_from_structure(
                     "functions",
                     "sensors",
                 ],
+                "quality_level": "focused",
+                "recall_priority": 2,
+                "precision_priority": 10,
+                "purpose": (
+                    "High-precision search requiring the core system, "
+                    "its function, and the sensing technology together."
+                ),
                 "expression": (
                     f"{core_expr}\n"
                     "AND\n"
@@ -357,14 +437,19 @@ def build_search_paths_from_structure(
                     "AND\n"
                     f"{sensor_expr}"
                 ),
-                "purpose": (
-                    "Narrow search requiring the core application, "
-                    "function, and sensing technology together."
-                ),
             }
         )
 
-    # 5. Sensor + Object + Function
+    # ------------------------------------------------------------------
+    # 5. SENSOR + OBJECT + FUNCTION
+    # ------------------------------------------------------------------
+    # Implementation/detail search.
+    #
+    # Purpose:
+    #   Find patents describing the same technical operation even
+    #   when the overall system terminology differs.
+    # ------------------------------------------------------------------
+
     if sensor_expr and object_expr and function_expr:
         paths.append(
             {
@@ -374,16 +459,19 @@ def build_search_paths_from_structure(
                     "objects",
                     "functions",
                 ],
+                "quality_level": "focused",
+                "recall_priority": 2,
+                "precision_priority": 8,
+                "purpose": (
+                    "Search the sensing technology in relation to "
+                    "specific objects and functions."
+                ),
                 "expression": (
                     f"{sensor_expr}\n"
                     "AND\n"
                     f"{object_expr}\n"
                     "AND\n"
                     f"{function_expr}"
-                ),
-                "purpose": (
-                    "Search the sensing technology in relation to "
-                    "specific objects and functions."
                 ),
             }
         )

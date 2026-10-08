@@ -1,0 +1,1092 @@
+1. Change ai_invention_structure_service.py
+Replace build_search_paths_from_structure()
+I recommend replacing the current function with this version:
+
+def build_search_paths_from_structure(
+    structure: dict,
+) -> list[dict]:
+    """
+    Build deterministic search paths from the reviewed invention structure.
+
+    Each path represents a different point on the recall/precision spectrum.
+
+    Recall:
+        More general role combinations.
+
+    Precision:
+        More invention-specific role combinations.
+
+    The user's edited terminology is authoritative.
+    """
+
+    application = _clean_terms(
+        structure.get("application", [])
+    )
+
+    core_system = _clean_terms(
+        structure.get("core_system", [])
+    )
+
+    sensors = _clean_terms(
+        structure.get("sensors", [])
+    )
+
+    functions = _clean_terms(
+        structure.get("functions", [])
+    )
+
+    objects = _clean_terms(
+        structure.get("objects", [])
+    )
+
+    application_expr = _role_expression(
+        application
+    )
+
+    core_expr = _role_expression(
+        core_system
+    )
+
+    sensor_expr = _role_expression(
+        sensors
+    )
+
+    function_expr = _role_expression(
+        functions,
+        wildcard=False,
+    )
+
+    object_expr = _role_expression(
+        objects
+    )
+
+    paths = []
+
+    # ------------------------------------------------------------------
+    # 1. CORE + FUNCTION
+    # ------------------------------------------------------------------
+    # Broad invention-identity search.
+    #
+    # Purpose:
+    #   High recall.
+    #
+    # This should normally retrieve a relatively large corpus.
+    # ------------------------------------------------------------------
+
+    if core_expr and function_expr:
+        paths.append(
+            {
+                "name": "Core + Function",
+                "roles": [
+                    "core_system",
+                    "functions",
+                ],
+                "quality_level": "broad",
+                "recall_priority": 5,
+                "precision_priority": 2,
+                "purpose": (
+                    "Broad search connecting the core system with "
+                    "its primary functions."
+                ),
+                "expression": (
+                    f"{core_expr}\n"
+                    "AND\n"
+                    f"{function_expr}"
+                ),
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # 2. SENSOR + FUNCTION
+    # ------------------------------------------------------------------
+    # Technical search.
+    #
+    # Purpose:
+    #   Good recall of patents using different system terminology
+    #   but describing similar technical behaviour.
+    # ------------------------------------------------------------------
+
+    if sensor_expr and function_expr:
+        paths.append(
+            {
+                "name": "Sensor + Function",
+                "roles": [
+                    "sensors",
+                    "functions",
+                ],
+                "quality_level": "broad",
+                "recall_priority": 4,
+                "precision_priority": 4,
+                "purpose": (
+                    "Search the sensing technology together with "
+                    "the functions it performs."
+                ),
+                "expression": (
+                    f"{sensor_expr}\n"
+                    "AND\n"
+                    f"{function_expr}"
+                ),
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # 3. CORE + SENSOR
+    # ------------------------------------------------------------------
+    # Architecture-oriented search.
+    #
+    # Purpose:
+    #   Find documents describing a similar technical architecture.
+    # ------------------------------------------------------------------
+
+    if core_expr and sensor_expr:
+        paths.append(
+            {
+                "name": "Core + Sensor",
+                "roles": [
+                    "core_system",
+                    "sensors",
+                ],
+                "quality_level": "balanced",
+                "recall_priority": 3,
+                "precision_priority": 6,
+                "purpose": (
+                    "Search for the core system together with "
+                    "the sensing architecture."
+                ),
+                "expression": (
+                    f"{core_expr}\n"
+                    "AND\n"
+                    f"{sensor_expr}"
+                ),
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # 4. CORE + FUNCTION + SENSOR
+    # ------------------------------------------------------------------
+    # High precision search.
+    #
+    # Purpose:
+    #   Strongest combination of invention identity, behaviour,
+    #   and technical mechanism.
+    # ------------------------------------------------------------------
+
+    if core_expr and function_expr and sensor_expr:
+        paths.append(
+            {
+                "name": "Core + Function + Sensor",
+                "roles": [
+                    "core_system",
+                    "functions",
+                    "sensors",
+                ],
+                "quality_level": "focused",
+                "recall_priority": 2,
+                "precision_priority": 10,
+                "purpose": (
+                    "High-precision search requiring the core system, "
+                    "its function, and the sensing technology together."
+                ),
+                "expression": (
+                    f"{core_expr}\n"
+                    "AND\n"
+                    f"{function_expr}\n"
+                    "AND\n"
+                    f"{sensor_expr}"
+                ),
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # 5. SENSOR + OBJECT + FUNCTION
+    # ------------------------------------------------------------------
+    # Implementation/detail search.
+    #
+    # Purpose:
+    #   Find patents describing the same technical operation even
+    #   when the overall system terminology differs.
+    # ------------------------------------------------------------------
+
+    if sensor_expr and object_expr and function_expr:
+        paths.append(
+            {
+                "name": "Sensor + Object + Function",
+                "roles": [
+                    "sensors",
+                    "objects",
+                    "functions",
+                ],
+                "quality_level": "focused",
+                "recall_priority": 2,
+                "precision_priority": 8,
+                "purpose": (
+                    "Search the sensing technology in relation to "
+                    "specific objects and functions."
+                ),
+                "expression": (
+                    f"{sensor_expr}\n"
+                    "AND\n"
+                    f"{object_expr}\n"
+                    "AND\n"
+                    f"{function_expr}"
+                ),
+            }
+        )
+
+    return paths
+
+    Why this is useful
+Previously a path looked like:
+{
+    "name": "Core + Function",
+    "expression": "..."
+}
+
+Now it carries:
+{
+    "name": "Core + Function",
+    "quality_level": "broad",
+    "recall_priority": 5,
+    "precision_priority": 2,
+    ...
+}
+
+2. Add quality information to the UI
+Your current UI already displays each approved path and its expression.    Pasted text(20261007-105535)
+Find this section:
+
+for _path in _approved_paths:
+    st.markdown(
+        f"**{_path['name']}**"
+    )
+
+    if _path.get("purpose"):
+        st.caption(
+            _path["purpose"]
+        )
+
+    st.code(
+        _path.get("expression", ""),
+        language="text",
+    )
+
+Replace it with:
+for _path in _approved_paths:
+    st.markdown(
+        f"**{_path['name']}**"
+    )
+
+    _quality = _path.get(
+        "quality_level",
+        "balanced",
+    )
+
+    _quality_label = {
+        "broad": "🟢 Broad / High Recall",
+        "balanced": "🟡 Balanced",
+        "focused": "🔴 Focused / High Precision",
+    }.get(
+        _quality,
+        "🟡 Balanced",
+    )
+
+    st.caption(
+        f"{_quality_label}"
+    )
+
+    if _path.get("purpose"):
+        st.caption(
+            _path["purpose"]
+        )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.metric(
+            "Recall priority",
+            _path.get("recall_priority", 0),
+        )
+
+    with col2:
+        st.metric(
+            "Precision priority",
+            _path.get("precision_priority", 0),
+        )
+
+    st.code(
+        _path.get("expression", ""),
+        language="text",
+    )
+
+3. Add path-level result counts
+This is the most useful change for your demo.
+At the moment _run_search() loops through the approved paths:
+
+for path in approved_paths:
+    expression = str(path.get("expression", "")).strip()
+
+    if not expression:
+        continue
+
+    results = search_patents_by_strategy(
+        query=expression,
+        limit=100,
+        offset=0,
+    )
+
+    raw.extend(results)
+
+Change this to:
+path_results = []
+
+for path in approved_paths:
+    expression = str(
+        path.get("expression", "")
+    ).strip()
+
+    if not expression:
+        continue
+
+    path_name = path.get(
+        "name",
+        "Unnamed path",
+    )
+
+    results = search_patents_by_strategy(
+        query=expression,
+        limit=100,
+        offset=0,
+    )
+
+    path_results.append(
+        {
+            "name": path_name,
+            "quality_level": path.get(
+                "quality_level",
+                "balanced",
+            ),
+            "recall_priority": path.get(
+                "recall_priority",
+                0,
+            ),
+            "precision_priority": path.get(
+                "precision_priority",
+                0,
+            ),
+            "count": len(results),
+        }
+    )
+
+    logger.info(
+        "AI Invention Structure path '%s' "
+        "returned %d results",
+        path_name,
+        len(results),
+    )
+
+    raw.extend(results)
+
+st.session_state.ai_search_path_results = path_results
+
+unique = deduplicate(raw)
+
+return raw, unique
+
+4. Display the search structure results
+After the search has completed, wherever you currently display:
+
+Raw fetched
+After dedup
+Duplicates removed
+
+add:
+
+_path_results = st.session_state.get(
+    "ai_search_path_results",
+    [],
+)
+
+if _path_results:
+    st.markdown("### Search Structure Performance")
+
+    _path_df = pd.DataFrame(
+        _path_results
+    )
+
+    _path_df = _path_df[
+        [
+            "name",
+            "quality_level",
+            "count",
+            "recall_priority",
+            "precision_priority",
+        ]
+    ]
+
+    _path_df.columns = [
+        "Search Path",
+        "Mode",
+        "Raw Results",
+        "Recall Priority",
+        "Precision Priority",
+    ]
+
+    st.dataframe(
+        _path_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+5. Fix 1 — approval code
+In streamlit_app.py, find:
+
+_approved_paths.append(
+    {
+        "name": str(
+            _path.get("name", "")
+        ).strip(),
+        "roles": list(
+            _path.get("roles", [])
+        ),
+        "expression": st.session_state.get(
+            (
+                f"ai_search_path_expression_"
+                f"{st.session_state.get('ai_search_path_generation', 0)}_"
+                f"{_index}"
+            ),
+            "",
+        ).strip(),
+        "purpose": str(
+            _path.get("purpose", "")
+        ).strip(),
+    }
+)
+
+Replace it with:
+_approved_paths.append(
+    {
+        "name": str(
+            _path.get("name", "")
+        ).strip(),
+
+        "roles": list(
+            _path.get("roles", [])
+        ),
+
+        "expression": st.session_state.get(
+            (
+                f"ai_search_path_expression_"
+                f"{st.session_state.get('ai_search_path_generation', 0)}_"
+                f"{_index}"
+            ),
+            "",
+        ).strip(),
+
+        "purpose": str(
+            _path.get("purpose", "")
+        ).strip(),
+
+        # Search-quality metadata
+        "quality_level": str(
+            _path.get(
+                "quality_level",
+                "balanced",
+            )
+        ).strip(),
+
+        "recall_priority": int(
+            _path.get(
+                "recall_priority",
+                0,
+            )
+        ),
+
+        "precision_priority": int(
+            _path.get(
+                "precision_priority",
+                0,
+            )
+        ),
+    }
+)
+
+6. In `models/schemas.py`, your existing `RankedPatent` should already contain roughly:
+
+class RankedPatent(BaseModel):
+    patent: PatentRecord
+    cosine_score: float
+    bm25_score: float
+    hybrid_score: float
+    coverage: float
+    concept_hits: dict
+
+Add:
+    importance_score: float = 0.0
+    importance_hits: dict = Field(default_factory=dict)
+
+So:
+
+class RankedPatent(BaseModel):
+    patent: PatentRecord
+
+    cosine_score: float
+    bm25_score: float
+    hybrid_score: float
+
+    coverage: float
+    concept_hits: dict = Field(default_factory=dict)
+
+    # Importance-aware relevance
+    importance_score: float = 0.0
+    importance_hits: dict = Field(default_factory=dict)
+
+Add the importance scorer to ranking_service.py
+Add this function above rank():
+
+def _importance_weight(importance: str) -> float:
+    """
+    Convert SearchConcept importance into a ranking weight.
+
+    Critical concepts have the strongest influence.
+    Supporting concepts contribute, but should not dominate ranking.
+    """
+
+    return {
+        "critical": 5.0,
+        "important": 3.0,
+        "supporting": 1.0,
+    }.get(
+        str(importance).strip().lower(),
+        1.0,
+    )
+
+
+def _calculate_importance_score(
+    patent: PatentRecord,
+    search_strategy=None,
+) -> tuple[float, dict[str, bool]]:
+    """
+    Calculate weighted concept coverage using the approved Search Strategy.
+
+    This is a soft relevance signal, not a hard filter.
+
+    Returns:
+        (
+            weighted_score,
+            concept_hits
+        )
+
+    weighted_score is in [0, 1].
+    """
+
+    if search_strategy is None:
+        return 0.0, {}
+
+    concepts = getattr(
+        search_strategy,
+        "concepts",
+        [],
+    )
+
+    if not concepts:
+        return 0.0, {}
+
+    text_parts = [
+        patent.patent_title or "",
+        patent.patent_abstract or "",
+    ]
+
+    # Include claims when available.
+    if getattr(
+        patent,
+        "patent_claims",
+        None,
+    ):
+        text_parts.append(
+            patent.patent_claims or ""
+        )
+
+    text = " ".join(text_parts).lower()
+
+    total_weight = 0.0
+    matched_weight = 0.0
+
+    concept_hits: dict[str, bool] = {}
+
+    for concept in concepts:
+        name = str(
+            getattr(concept, "name", "")
+        ).strip()
+
+        terms = [
+            str(term).strip().lower()
+            for term in getattr(
+                concept,
+                "terms",
+                [],
+            )
+            if str(term).strip()
+        ]
+
+        if not name or not terms:
+            continue
+
+        weight = _importance_weight(
+            getattr(
+                concept,
+                "importance",
+                "supporting",
+            )
+        )
+
+        total_weight += weight
+
+        operator = str(
+            getattr(
+                concept,
+                "operator",
+                "OR",
+            )
+        ).strip().upper()
+
+        if operator == "AND":
+            matched = all(
+                term in text
+                for term in terms
+            )
+        else:
+            matched = any(
+                term in text
+                for term in terms
+            )
+
+        concept_hits[name] = matched
+
+        if matched:
+            matched_weight += weight
+
+    if total_weight <= 0:
+        return 0.0, concept_hits
+
+    return (
+        matched_weight / total_weight,
+        concept_hits,
+    )
+
+Add a soft importance adjustment
+Add:
+
+def _apply_importance_score(
+    hybrid: float,
+    importance_score: float,
+    importance_hits: dict[str, bool],
+    search_strategy=None,
+) -> float:
+    """
+    Apply importance-aware relevance as a soft ranking adjustment.
+
+    The adjustment never completely removes a patent from consideration.
+    """
+
+    if search_strategy is None:
+        return hybrid
+
+    concepts = getattr(
+        search_strategy,
+        "concepts",
+        [],
+    )
+
+    if not concepts:
+        return hybrid
+
+    critical_concepts = [
+        concept
+        for concept in concepts
+        if str(
+            getattr(
+                concept,
+                "importance",
+                "",
+            )
+        ).lower() == "critical"
+    ]
+
+    critical_missing = any(
+        not importance_hits.get(
+            str(
+                getattr(
+                    concept,
+                    "name",
+                    "",
+                )
+            ).strip(),
+            False,
+        )
+        for concept in critical_concepts
+    )
+
+    # Normal soft relevance adjustment.
+    #
+    # 0.60 → even a weak candidate retains 60% of its hybrid score.
+    # 1.00 → full concept match receives no penalty.
+    multiplier = (
+        0.60
+        + (0.40 * importance_score)
+    )
+
+    # Missing a critical concept deserves an additional penalty,
+    # but does NOT eliminate the patent.
+    if critical_missing:
+        multiplier *= 0.75
+
+    return hybrid * multiplier
+
+Modify rank()
+Your current rank() has this section:
+
+if tokens is not None and getattr(tokens, "concept_groups", None):
+    penalised_hybrid = np.empty_like(hybrid)
+
+    for i, patent in enumerate(patents_f):
+        cov_data = compute_token_coverage(
+            patent,
+            tokens,
+        )
+
+        coverage_data_list.append(
+            cov_data
+        )
+
+        penalised_hybrid[i] = apply_coverage_penalty(
+            float(hybrid[i]),
+            cov_data["coverage"],
+            penalty_curve="quadratic",
+        )
+
+    hybrid = penalised_hybrid
+
+We should not remove this.
+Instead, immediately after it, apply the new Search Strategy importance layer.
+First change the function signature:
+
+def rank(
+    query: str,
+    patents: list[PatentRecord],
+    doc_vecs: np.ndarray,
+    query_vec: np.ndarray,
+    top_k: int | None = None,
+    critical_tokens: list[str] | None = None,
+    tokens=None,
+    search_strategy=None,
+) -> list[RankedPatent]:
+
+Then after the existing coverage calculation:
+
+    # ---------------------------------------------------------------
+    # 4c. Importance-aware Search Strategy scoring
+    # ---------------------------------------------------------------
+
+    importance_scores = np.zeros(
+        len(patents_f),
+        dtype=float,
+    )
+
+    importance_hits_list: list[dict] = []
+
+    for i, patent in enumerate(patents_f):
+
+        importance_score, importance_hits = (
+            _calculate_importance_score(
+                patent,
+                search_strategy,
+            )
+        )
+
+        importance_scores[i] = (
+            importance_score
+        )
+
+        importance_hits_list.append(
+            importance_hits
+        )
+
+        hybrid[i] = _apply_importance_score(
+            float(hybrid[i]),
+            importance_score,
+            importance_hits,
+            search_strategy,
+        )
+
+        logger.debug(
+            "Importance scoring: patent=%s "
+            "importance=%.3f hits=%s",
+            patent.patent_id,
+            importance_score,
+            importance_hits,
+        )
+
+Then update RankedPatent
+Your existing construction is approximately:
+
+RankedPatent(
+    patent=patents_f[i],
+    cosine_score=float(cosine_f[i]),
+    bm25_score=float(bm25_norm[i]),
+    hybrid_score=float(hybrid[i]),
+    coverage=float(
+        coverage_data_list[i]["coverage"]
+    ),
+    concept_hits=coverage_data_list[i][
+        "concept_hits"
+    ],
+)
+
+Change to:
+RankedPatent(
+    patent=patents_f[i],
+
+    cosine_score=float(
+        cosine_f[i]
+    ),
+
+    bm25_score=float(
+        bm25_norm[i]
+    ),
+
+    hybrid_score=float(
+        hybrid[i]
+    ),
+
+    coverage=float(
+        coverage_data_list[i]["coverage"]
+    ),
+
+    concept_hits=coverage_data_list[i][
+        "concept_hits"
+    ],
+
+    importance_score=float(
+        importance_scores[i]
+    ),
+
+    importance_hits=importance_hits_list[i],
+)
+
+Pass the Search Strategy from Streamlit
+This is the other critical change.
+Your current _run_rank() does:
+
+return rank(
+    query=q,
+    patents=patents,
+    doc_vecs=doc_vecs,
+    query_vec=query_vec,
+    top_k=k,
+    critical_tokens=critical or None,
+    tokens=tokens,
+)
+
+Change it to:
+search_strategy = st.session_state.get(
+    "search_strategy"
+)
+
+return rank(
+    query=q,
+    patents=patents,
+    doc_vecs=doc_vecs,
+    query_vec=query_vec,
+    top_k=k,
+    critical_tokens=critical or None,
+    tokens=tokens,
+    search_strategy=search_strategy,
+)
+
+Add the scores to your Technical Relevance table
+Your current table displays:
+
+"hybrid": round(rp.hybrid_score, 4),
+"cosine": round(rp.cosine_score, 4),
+"bm25": round(rp.bm25_score, 4),
+
+Add:
+"importance": round(
+    rp.importance_score,
+    4,
+),
+
+So:
+rows.append({
+    "#": i,
+    "patent_id": rp.patent.patent_id,
+    "title": "\n".join(
+        textwrap.wrap(
+            rp.patent.patent_title or "",
+            width=80,
+        )
+    ),
+    "type": rp.patent.patent_type or "—",
+    "date": rp.patent.patent_date or "—",
+
+    "hybrid": round(
+        rp.hybrid_score,
+        4,
+    ),
+
+    "importance": round(
+        rp.importance_score,
+        4,
+    ),
+
+    "cosine": round(
+        rp.cosine_score,
+        4,
+    ),
+
+    "bm25": round(
+        rp.bm25_score,
+        4,
+    ),
+})
+
+I'd also show concept hits
+This will make your demo much more convincing.
+Add:
+
+"concept_coverage": (
+    ", ".join(
+        name
+        for name, hit
+        in rp.importance_hits.items()
+        if hit
+    )
+    or "—"
+),
+
+7. Fix search_patents_by_strategy()
+There is also a definite bug in the version surfaced from your project:
+return [    _build_patent_record(raw)    for raw in raw_records]
+
+
+because _build_patent_record() can return None.
+Use:
+records: list[PatentRecord] = []
+
+for raw in raw_records:
+    if not isinstance(raw, dict):
+        continue
+
+    patent = _build_patent_record(raw)
+
+    if patent is not None:
+        records.append(patent)
+
+return records
+
+This keeps the strategy-search path consistent with the normal USPTO search path.
+
+Make the generated search expressions explicit
+I would change the structure builder so the expressions are always produced on one line.
+For example:
+def _combine_roles(*expressions: str) -> str:
+    parts = [
+        expression.strip()
+        for expression in expressions
+        if expression and expression.strip()
+    ]
+
+    return " AND ".join(f"({part})" for part in parts)
+
+Then:
+# Core + Function
+if core_expr and function_expr:
+    paths.append({
+        "name": "Core + Function",
+        "roles": ["core_system", "functions"],
+        "expression": _combine_roles(
+            core_expr,
+            function_expr,
+        ),
+        "purpose": (
+            "Broad invention-identity search combining "
+            "the core system with its primary function."
+        ),
+    })
+
+Similarly:
+# Sensor + Function
+if sensor_expr and function_expr:
+    paths.append({
+        "name": "Sensor + Function",
+        "roles": ["sensors", "functions"],
+        "expression": _combine_roles(
+            sensor_expr,
+            function_expr,
+        ),
+        "purpose": (
+            "Technical implementation search combining "
+            "the sensing technology with its function."
+        ),
+    })
+
+and:
+# Core + Sensor
+if core_expr and sensor_expr:
+    paths.append({
+        "name": "Core + Sensor",
+        "roles": ["core_system", "sensors"],
+        "expression": _combine_roles(
+            core_expr,
+            sensor_expr,
+        ),
+        "purpose": (
+            "Architecture search combining the core system "
+            "with its sensing technology."
+        ),
+    })
+
+Most important: capture path provenance
+Instead of:
+raw.extend(results)
+
+
+I recommend temporarily storing:
+
+path_results = []
+
+for path in approved_paths:
+    expression = str(path.get("expression", "")).strip()
+
+    if not expression:
+        continue
+
+    results = search_patents_by_strategy(
+        query=expression,
+        limit=100,
+        offset=0,
+    )
+
+    for patent in results:
+        path_results.append({
+            "patent": patent,
+            "path": path.get("name", ""),
+        })
+
+Add a search_paths field to PatentRecord
+I would add:
+search_paths: list[str] = Field(default_factory=list)
+
+Then a patent can carry:
+PatentRecord(
+    ...,
+    search_paths=[
+        "Sensor + Function",
+        "Sensor + Object + Function",
+    ],
+)Add a search_paths field to PatentRecord
+I would add:
+
+search_paths: list[str] = Field(default_factory=list)
+
+

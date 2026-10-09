@@ -36,6 +36,9 @@ from models.schemas import SearchStrategy, SearchConcept, ProximityRule
 from services.ai_classification_service import (
     generate_classification_suggestions,
 )
+from services.classification_catalogue_service import (
+    get_cpc_catalogue_entry,
+)
 from services.ai_invention_structure_service import (
     generate_invention_structure,
     build_search_paths_from_structure,
@@ -2092,9 +2095,17 @@ with tab_search:
             key=lambda x: x[1]["count"],
             reverse=True,
         ):
+            catalogue_entry = get_cpc_catalogue_entry(classification)
+            cpc_title = (
+                catalogue_entry["title"]
+                if catalogue_entry
+                else "—"
+            )
+
             cpc_rows.append(
                 {
                     "CPC": classification,
+                    "CPC title": cpc_title,
                     "Patents": data["count"],
                     "% of results": round(
                         data["count"]
@@ -2128,6 +2139,50 @@ with tab_search:
             ),
             key="selected_cpc_classifications",
         )
+
+        # Display official CPC catalogue information without changing
+        # the existing search or patent-selection behavior.
+        if selected_cpc:
+            st.markdown("#### Official CPC Catalogue Information")
+
+            for classification in selected_cpc:
+                entry = get_cpc_catalogue_entry(classification)
+
+                with st.expander(
+                    f"{classification} — "
+                    f"{entry['title'] if entry else 'Catalogue entry unavailable'}"
+                ):
+                    if not entry:
+                        st.info(
+                            "No matching entry was found in the imported "
+                            "CPC catalogue. The classification remains "
+                            "available for review."
+                        )
+                        continue
+
+                    st.markdown(f"**Official title:** {entry['title']}")
+
+                    if entry.get("official_definition"):
+                        st.markdown("**Official definition**")
+                        st.write(entry["official_definition"])
+                    else:
+                        st.info(
+                            "No official definition is available for "
+                            "this catalogue entry."
+                        )
+
+                    if entry.get("scope_notes"):
+                        st.markdown("**Scope notes**")
+                        st.write(entry["scope_notes"])
+
+                    if entry.get("special_rules"):
+                        st.markdown("**Special rules**")
+                        st.write(entry["special_rules"])
+
+                    st.caption(
+                        f"Catalogue source version: "
+                        f"{entry.get('source_version') or 'Unknown'}"
+                    )
 
         if selected_cpc:
             patent_ids = []

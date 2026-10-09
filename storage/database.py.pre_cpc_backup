@@ -20,20 +20,15 @@ import sys
 from pathlib import Path
 
 from sqlalchemy import (
-    Boolean,
     Column,
     DateTime,
-    Index,
-    Integer,
     MetaData,
     String,
     Table,
     Text,
-    UniqueConstraint,
     create_engine,
     func,
 )
-from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.engine import Engine
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -78,43 +73,6 @@ patents_table = Table(
         server_default=func.now(),
         nullable=False,
     ),
-    mysql_engine="InnoDB",
-    mysql_charset="utf8mb4",
-)
-
-classification_entries_table = Table(
-    "classification_entries",
-    metadata,
-    Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("system", String(8), nullable=False),
-    Column("classification_code", String(32), nullable=False),
-    Column("title", Text, nullable=False),
-    Column("level", String(24), nullable=True),
-    Column("parent_code", String(32), nullable=True),
-    Column("official_definition", LONGTEXT, nullable=True),
-    Column("scope_notes", LONGTEXT, nullable=True),
-    Column("references_json", LONGTEXT, nullable=True),
-    Column("glossary_json", LONGTEXT, nullable=True),
-    Column("special_rules", LONGTEXT, nullable=True),
-    Column("definition_available", Boolean, nullable=False, default=False),
-    Column("source_file", String(255), nullable=False),
-    Column("source_version", String(32), nullable=False),
-    Column("source_publication_date", String(16), nullable=True),
-    Column("source_publication_type", String(32), nullable=True),
-    Column("source_url", Text, nullable=True),
-    Column(
-        "imported_at",
-        DateTime,
-        nullable=False,
-        server_default=func.now(),
-    ),
-    UniqueConstraint(
-        "system",
-        "classification_code",
-        "source_version",
-        name="uq_classification_system_code_version",
-    ),
-    Index("ix_classification_system_code", "system", "classification_code"),
     mysql_engine="InnoDB",
     mysql_charset="utf8mb4",
 )

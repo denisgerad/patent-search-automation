@@ -1,0 +1,131 @@
+What we need to build
+
+Classification catalogue
+Store codes, titles, official definitions, hierarchy, notes and source versions for all three systems.
+
+
+
+
+Local searchable database
+Import official classification data into your database so the application can search definitions without downloading them on every request.
+
+
+
+
+Search refinement integration
+Let users search definitions, inspect related classes and select appropriate classifications before running patent searches.
+
+
+
+One requirement needs to be explicit: a class or subclass may have an official title but no separate detailed definition. The catalogue must record that distinction rather than inventing a definition or treating a parent class's definition as the child's official definition.
+
+CPC — Cooperative Patent Classification
+Start here: CPC Scheme and Definitions — Bulk Data
+Provides downloadable XML for the complete CPC scheme and CPC definitions, along with validity and revision information. This is the best starting point for a reproducible bulk import.
+
+Suggested table: classification_entries
+Field	Purpose
+id	Internal primary key
+system	CPC, IPC or USPC
+classification_code	Official code, preserved in canonical form
+title	Official class, subclass or group title
+level	Section, class, subclass, main group or subgroup
+parent_code	Parent entry, where applicable
+official_definition	Exact imported definition, if available
+scope_notes	Official notes, exclusions and references
+definition_available	Whether a detailed official definition exists
+source_url	Official source for the entry
+source_version	Classification edition or revision
+effective_from	Date that version became effective, if known
+imported_at	Date the application imported the record
+Use a unique constraint on (system, classification_code, source_version) so different classification systems and historical versions can coexist.
+I would also keep an import-history table recording the source file, version, import timestamp, records added or changed, and any errors.
+Why hierarchy matters
+Consider a classification entry that has a title but no independent definition. Its parent may contain the detailed explanation that helps a user understand its scope.
+Store the parent-child relationship and display the parent's definition as parent context, clearly labelled. Do not copy it into the child's official_definition field.
+4. Implementation workflow
+1
+
+Download official source files
+Obtain CPC XML scheme and definition files, IPC master files, and the available USPC schedules and definitions. Record the source and edition of each file.
+
+
+
+2
+
+Build three import adapters
+Create import_cpc.py, import_ipc.py and import_uspc.py. Each parser converts its source format into the same internal record structure.
+
+
+
+3
+
+Normalize and validate
+Preserve official codes, titles, hierarchy and definition text. Detect duplicate records, missing parent links and unavailable definitions. Never silently replace an official definition with generated text.
+
+
+
+4
+
+Load into the catalogue
+Upsert records using system, code and version. A failed import should not leave the active catalogue partially updated.
+
+
+
+5
+
+Add a classification browser
+Search by code, title or definition. Display the hierarchy, definition availability, source/version and links to the official source.
+
+
+
+6
+
+Connect it to refinement
+Let users inspect a class definition before selecting it for CPC-only, USPC-only or original-search-plus-classification refinement.
+
+
+
+5. How it should integrate with your existing Streamlit application
+I would keep the catalogue independent from the existing search and ranking logic initially.
+The flow would be:
+Classification Refinement UI
+Search or browse CPC / IPC / USPC
+
+Catalogue lookup service
+Retrieve official title, definition, notes and hierarchy
+
+User reviews and selects classifications
+
+Existing patent search and ranking pipeline
+Keep current retrieval and ranking behaviour unchanged initially
+
+
+For example, when the user selects a CPC code, the UI could show:
+- Official code and title
+- Official definition and scope notes
+- Parent classification and neighbouring entries
+- Source and revision date
+- Whether a detailed official definition is available
+- A Select for refinement action
+IPC entries can also be displayed even if no independent detailed definition exists.
+6. Add AI only after the official catalogue works
+Once the data is imported and validated, the LLM can use the catalogue to help explain classification choices.
+A useful later workflow would be:
+1. Extract the invention's core technical features.
+2. Search classification titles and official definitions for candidate classes.
+3. Explain why each candidate class may or may not fit.
+4. Let the user approve the proposed classifications.
+5. Run the existing refinement modes and compare the results.
+The LLM should distinguish official text from AI-generated explanation in the UI. AI-generated explanations can help the user understand a definition, but must not be presented as official classification text.
+7. Suggested implementation order
+Phase	Deliverable	Acceptance criterion
+1	Catalogue schema and import-history tracking	Versioned records can be stored without collisions
+2	CPC import	Codes, titles, hierarchy and published definitions load correctly
+3	IPC import	Available definitions are imported, and unavailable ones are explicitly recorded
+4	USPC import	Legacy classes, subclasses and available definitions are searchable
+5	Classification browser	User can search, inspect and select a classification
+6	Search refinement integration	Existing modes still work and can be evaluated against the baseline
+7	AI-assisted classification	Suggested classifications have traceable evidence and require user review
+My recommendation is to start with the schema plus CPC ingestion, then use the same internal structure for IPC and USPC. CPC provides a clear bulk XML source; the other two systems can use their respective official formats and adapters.
+One thing I would establish before writing the importers is the current database and repository structure. The catalogue schema can be designed now, but the exact migration and parser code should fit your existing persistence layer rather than introducing a parallel data store.

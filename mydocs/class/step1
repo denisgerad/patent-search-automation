@@ -1,0 +1,25 @@
+Step 1 — Extract into a temporary review folder
+From your project root, run:
+mkdir -p /tmp/cpc_catalogue_review
+
+unzip -o versions/cpc_catalogue_phase1_bundle.zip \
+  -d /tmp/cpc_catalogue_review
+
+
+This will not change your application files.
+Step 2 — Check the database changes
+Run:
+diff -u storage/database.py \
+  /tmp/cpc_catalogue_review/cpc_catalogue_phase1/storage/database.py
+
+
+Then inspect the importer:
+sed -n '1,240p' \
+  /tmp/cpc_catalogue_review/cpc_catalogue_phase1/scripts/import_cpc_definitions.py
+
+
+And inspect its README:
+cat /tmp/cpc_catalogue_review/cpc_catalogue_phase1/README.md
+
+
+Please share the output, particularly any errors. The database diff may be lengthy; that's fine.

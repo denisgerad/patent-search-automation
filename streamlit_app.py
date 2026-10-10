@@ -1551,6 +1551,26 @@ def _run_rank(q: str, patents: list, k: int) -> list:
         meta.get("critical_tokens", []) + meta.get("patent_synonyms", [])
     ))
     search_strategy = st.session_state.get("search_strategy")
+    logger.warning(
+        "RANK STRATEGY DEBUG | present=%s | type=%s | approved=%s",
+        search_strategy is not None,
+        type(search_strategy).__name__ if search_strategy is not None else None,
+        st.session_state.get("search_strategy_approved", False),
+    )
+
+    logger.warning(
+        "RANK STRATEGY CONCEPTS | %s",
+        [
+            {
+                "name": getattr(c, "name", None),
+                "importance": getattr(c, "importance", None),
+                "terms": getattr(c, "terms", None),
+                "operator": getattr(c, "operator", None),
+            }
+            for c in getattr(search_strategy, "concepts", [])
+        ],
+    )
+
     return rank(
         query=q,
         patents=patents,
@@ -3146,6 +3166,122 @@ with tab_search:
                     use_container_width=True,
                     hide_index=True,
                 )
+
+                # Second-stage refinement: choose a CPC found
+                # in the classification-refined result set.
+                st.markdown("#### Refine by a specific CPC")
+
+                available_cpc = sorted({
+                    "".join(str(code).split())
+                    for patent in refined_patents
+                    for code in (patent.cpc_classifications or [])
+                    if str(code).strip()
+                })
+
+                if available_cpc:
+                    selected_result_cpc = st.selectbox(
+                        "Choose a CPC classification",
+                        options=available_cpc,
+                        key="selected_result_cpc",
+                        help=(
+                            "Choose a CPC present in the current "
+                            "classification-refined results."
+                        ),
+                    )
+
+                    if st.button(
+                        "Search original query with this CPC",
+                        key="apply_selected_result_cpc",
+                        type="primary",
+                    ):
+                        from services.search_service import (
+                            fetch_patents_with_fallback,
+                        )
+                        from services.dedup_service import deduplicate
+
+                        expansion_metadata = st.session_state.get(
+                            "expansion_metadata", {}
+                        )
+                        tokens = expansion_metadata.get("tokens")
+                        validated_queries = expansion_metadata.get(
+                            "validated_queries", []
+                        )
+
+                        if settings.search_backend.lower() != "uspto":
+                            st.warning(
+                                "This refinement currently requires "
+                                "the USPTO ODP backend."
+                            )
+                        elif tokens is None:
+                            st.warning(
+                                "Search token information is unavailable. "
+                                "Please run the original search again."
+                            )
+                        else:
+                            with st.spinner(
+                                f"Searching with CPC {selected_result_cpc}…"
+                            ):
+                                raw_results = fetch_patents_with_fallback(
+                                    tokens,
+                                    validated_queries,
+                                    15,
+                                    cpc_classifications=[
+                                        selected_result_cpc
+                                    ],
+                                    uspc_classes=[],
+                                    classification_operator="AND",
+                                )
+
+                            refined_results = deduplicate(raw_results)
+
+                            st.session_state.raw_patents = raw_results
+                            st.session_state.unique_patents = refined_results
+                            st.session_state.classification_refined_patents = (
+                                refined_results
+                            )
+                            st.session_state.classification_refinement_applied = (
+                                True
+                            )
+
+                            st.success(
+                                f"CPC {selected_result_cpc}: "
+                                f"{len(refined_results)} unique patent(s)."
+                            )
+
+                            if refined_results:
+                                with st.spinner(
+                                    "Ranking CPC-refined results…"
+                                ):
+                                    ranked = _timed(
+                                        "3. Embed + rank",
+                                        _run_rank,
+                                        query,
+                                        refined_results,
+                                        top_k,
+                                    )
+
+                                st.session_state.ranked = ranked
+                                st.session_state.stage = 3
+
+                                st.dataframe(
+                                    pd.DataFrame([
+                                        {
+                                            "Patent ID": p.patent_id,
+                                            "Title": p.patent_title or "—",
+                                            "CPC": ", ".join(
+                                                p.cpc_classifications or []
+                                            ),
+                                        }
+                                        for p in refined_results
+                                    ]),
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
+                else:
+                    st.info(
+                        "No CPC classifications are present in these "
+                        "results. Try another refinement or search."
+                    )
             else:
                 st.warning(
                     "No patents matched the selected classifications."

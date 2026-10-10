@@ -330,74 +330,51 @@ def _build_odp_query(
     uspc_classes: list[str] | None = None,
     classification_operator: str = "AND",
 ) -> str:
-    """Build an ODP application-search query.
+    """Build a title search constrained by classification criteria.
 
-    The original query remains an invention-title search.
-    Optional CPC and USPC class criteria are added as field-qualified
-    Boolean clauses.
+    Original title search is always ANDed with the classification
+    expression. Within each classification family, values use OR.
+    The supplied operator combines the CPC and USPC groups.
     """
-
     query = " ".join(query.split()).strip()
-
     if not query:
-        return query
+        return ""
 
     title_clause = f'applicationMetaData.inventionTitle:"{query}"'
+    groups = []
 
-    classification_groups = []
+    cpc_terms = [
+        f"applicationMetaData.cpcClassificationBag:{normalized}"
+        for item in (cpc_classifications or [])
+        if (normalized := "".join(str(item).split()))
+    ]
+    if cpc_terms:
+        groups.append(
+            "(" + " OR ".join(cpc_terms) + ")"
+        )
 
-    # CPC classifications: OR within the CPC group.
-    if cpc_classifications:
-        cpc_terms = []
+    uspc_terms = [
+        f"applicationMetaData.class:{normalized}"
+        for item in (uspc_classes or [])
+        if (normalized := str(item).strip())
+    ]
+    if uspc_terms:
+        groups.append(
+            "(" + " OR ".join(uspc_terms) + ")"
+        )
 
-        for classification in cpc_classifications:
-            normalized = " ".join(str(classification).split()).strip()
-            normalized = normalized.replace(" ", "")
-
-            if normalized:
-                cpc_terms.append(
-                    f"applicationMetaData.cpcClassificationBag:{normalized}"
-                )
-
-        if cpc_terms:
-            classification_groups.append(
-                "(" + " OR ".join(cpc_terms) + ")"
-            )
-
-    # USPC classes: OR within the USPC group.
-    if uspc_classes:
-        uspc_terms = []
-
-        for classification in uspc_classes:
-            normalized = str(classification).strip()
-
-            if normalized:
-                uspc_terms.append(
-                    f"applicationMetaData.class:{normalized}"
-                )
-
-        if uspc_terms:
-            classification_groups.append(
-                "(" + " OR ".join(uspc_terms) + ")"
-            )
-
-    if not classification_groups:
+    if not groups:
         return title_clause
 
-    operator = (
-        classification_operator.strip().upper()
-        if classification_operator
-        else "AND"
-    )
-
+    operator = str(classification_operator or "AND").strip().upper()
     if operator not in {"AND", "OR"}:
-        operator = "AND"
+        raise ValueError(
+            "Classification operator must be AND or OR"
+        )
 
-    return (
-        title_clause
-        + f" {operator} "
-        + f" {operator} ".join(classification_groups)
-    )
+    classification_expression = f" {operator} ".join(groups)
+
+    return f"{title_clause} AND ({classification_expression})"
 
 
 def search_patents(
@@ -584,92 +561,67 @@ def search_patents_with_classification(
     uspc_classes: list[str] | None = None,
     classification_operator: str = "AND",
 ) -> list[PatentRecord]:
-    """Search USPTO ODP using structured classification filters.
+    """Search USPTO ODP using a structured classification filter.
 
-    The text query remains in the ODP q parameter.
-    CPC and USPC classifications are sent through the structured
-    filters parameter.
+    The title query is sent through q. Classification codes are sent
+    through the endpoint's filters parameter.
     """
-
     headers = _build_headers()
-    headers["Content-Type"] = "application/json"
-
     query = " ".join(query.split()).strip()
 
     if not query:
         return []
 
-    filters = []
+    cpc_values = list(dict.fromkeys(
+        "".join(str(code).split())
+        for code in (cpc_classifications or [])
+        if str(code).strip()
+    ))
+    uspc_values = list(dict.fromkeys(
+        str(code).strip()
+        for code in (uspc_classes or [])
+        if str(code).strip()
+    ))
 
-    if cpc_classifications:
-        cpc_values = []
+    if cpc_values and uspc_values:
+        raise ValueError(
+            "The ODP filters parameter accepts one classification field "
+            "per request; CPC and USPC groups must be combined separately."
+        )
 
-        for classification in cpc_classifications:
-            normalized = " ".join(
-                str(classification).split()
-            ).strip()
+    if cpc_values:
+        filter_field = "applicationMetaData.cpcClassificationBag"
+        filter_values = cpc_values
+    elif uspc_values:
+        filter_field = "applicationMetaData.class"
+        filter_values = uspc_values
+    else:
+        filter_field = None
+        filter_values = []
 
-            if normalized:
-                cpc_values.append(
-                    normalized.replace(" ", "")
-                )
-
-        if cpc_values:
-            filters.append(
-                {
-                    "name": "applicationMetaData.cpcClassificationBag",
-                    "value": cpc_values,
-                }
-            )
-
-    if uspc_classes:
-        uspc_values = []
-
-        for classification in uspc_classes:
-            normalized = str(classification).strip()
-
-            if normalized:
-                uspc_values.append(normalized)
-
-        if uspc_values:
-            filters.append(
-                {
-                    "name": "applicationMetaData.class",
-                    "value": uspc_values,
-                }
-            )
-
-    payload = {
+    params = {
         "q": f'applicationMetaData.inventionTitle:"{query}"',
-        "filters": filters,
-        "pagination": {
-            "offset": offset,
-            "limit": min(limit, 100),
-        },
+        "offset": offset,
+        "limit": min(limit, 100),
     }
 
-    log.info(
-        "USPTO ODP classified search: %s -> %s",
-        query,
-        payload,
-    )
+    if filter_field:
+        params["filters"] = f"{filter_field} {','.join(filter_values)}"
+
+    log.info("USPTO ODP classified search parameters: %s", params)
 
     try:
-        response = requests.post(
+        response = requests.get(
             USPTO_SEARCH_URL,
             headers=headers,
-            json=payload,
+            params=params,
             timeout=30,
         )
-
     except requests.exceptions.RequestException as exc:
-        log.error(
-            "USPTO ODP classified search network error: %s",
-            exc,
-        )
+        log.error("USPTO ODP classified search network error: %s", exc)
         return []
 
-    if response.status_code != 200:
+    if response.status_code not in (200,):
         log.error(
             "USPTO ODP classified search failed: %s — %s",
             response.status_code,
@@ -679,20 +631,13 @@ def search_patents_with_classification(
 
     try:
         data = response.json()
-
     except ValueError:
-        log.error(
-            "USPTO ODP classified search returned invalid JSON"
-        )
+        log.error("USPTO ODP classified search returned invalid JSON")
         return []
 
-    raw_records = data.get(
-        "patentFileWrapperDataBag",
-        [],
-    )
-
+    raw_records = data.get("patentFileWrapperDataBag", [])
     log.info(
-        "USPTO ODP classified raw records: %d",
+        "USPTO ODP classified search returned %d raw records",
         len(raw_records),
     )
 
@@ -703,13 +648,7 @@ def search_patents_with_classification(
             continue
 
         patent = _build_patent_record(raw)
-
         if patent is not None:
             records.append(patent)
-
-    log.info(
-        "USPTO ODP classified search complete: %d records",
-        len(records),
-    )
 
     return records

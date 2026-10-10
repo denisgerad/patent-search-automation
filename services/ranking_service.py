@@ -18,6 +18,7 @@ Algorithm (clean / mathematically sound)
 """
 
 import logging
+import re
 
 import numpy as np
 
@@ -235,7 +236,8 @@ def _calculate_importance_score(
             patent.patent_claims or ""
         )
 
-    text = " ".join(text_parts).lower()
+    text = " ".join(text_parts)
+    normalized_text = re.sub(r"[-_]+", " ", text).lower()
 
     total_weight = 0.0
     matched_weight = 0.0
@@ -247,7 +249,7 @@ def _calculate_importance_score(
         ).strip()
 
         terms = [
-            str(term).strip().lower()
+            re.sub(r"[-_]+", " ", str(term).strip()).lower()
             for term in getattr(
                 concept,
                 "terms",
@@ -279,12 +281,12 @@ def _calculate_importance_score(
 
         if operator == "AND":
             matched = all(
-                term in text
+                term in normalized_text
                 for term in terms
             )
         else:
             matched = any(
-                term in text
+                term in normalized_text
                 for term in terms
             )
 

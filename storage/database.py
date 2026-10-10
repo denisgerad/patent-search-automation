@@ -119,6 +119,44 @@ classification_entries_table = Table(
     mysql_charset="utf8mb4",
 )
 
+classification_scheme_entries_table = Table(
+    "classification_scheme_entries",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("system", String(8), nullable=False),
+    Column("classification_code", String(32), nullable=False),
+    Column("title", Text, nullable=False),
+    Column("level", Integer, nullable=False),
+    Column("parent_code", String(32), nullable=True),
+    Column("definition_available", Boolean, nullable=False, default=False),
+    Column("source_file", String(255), nullable=False),
+    Column("source_version", String(32), nullable=False),
+    Column("source_publication_date", String(16), nullable=True),
+    Column("source_publication_type", String(32), nullable=True),
+    Column("date_revised", String(16), nullable=True),
+    Column("status", String(40), nullable=True),
+    Column(
+        "imported_at",
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    ),
+    UniqueConstraint(
+        "system",
+        "classification_code",
+        "source_version",
+        name="uq_scheme_system_code_version",
+    ),
+    Index(
+        "ix_scheme_system_code",
+        "system",
+        "classification_code",
+    ),
+    mysql_engine="InnoDB",
+    mysql_charset="utf8mb4",
+)
+
 
 def create_tables() -> None:
     """Create the patents table if it does not already exist (idempotent)."""

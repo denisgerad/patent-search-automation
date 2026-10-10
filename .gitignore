@@ -82,3 +82,8 @@ htmlcov/
 *.log
 logs/
 data/classification/*.zip
+classification.csv
+# Ignore imported CPC scheme and definition archives and local generated dataset copies.
+data/classification/CPCSchemeXML202608.zip
+data/classification/FullCPCDefinitionXML202608.zip
+classification.csv

@@ -2165,10 +2165,16 @@ with tab_search:
                     if entry.get("official_definition"):
                         st.markdown("**Official definition**")
                         st.write(entry["official_definition"])
+                    elif entry.get("definition_available") is False:
+                        st.info(
+                            "This CPC classification exists in the official scheme, "
+                            "but no separate definition is available in the imported "
+                            "definition catalogue."
+                        )
                     else:
                         st.info(
-                            "No official definition is available for "
-                            "this catalogue entry."
+                            "No official definition text is available in the "
+                            "imported catalogue."
                         )
 
                     if entry.get("scope_notes"):

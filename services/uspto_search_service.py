@@ -83,21 +83,6 @@ def _extract_xml_text(
     return ""
 
 
-def _inspect_claim_elements(xml_text: str) -> None:
-    """Temporarily report claim-related XML element names."""
-    root = ET.fromstring(xml_text)
-
-    matches = []
-    for element in root.iter():
-        local_name = element.tag.split("}")[-1].lower()
-        if "claim" in local_name:
-            matches.append(local_name)
-
-    print("XML root:", root.tag.split("}")[-1])
-    print("Claim-related element names:", sorted(set(matches)))
-    print("Claim-related element count:", len(matches))
-
-
 def _extract_xml_claims(root: ET.Element) -> str | None:
     """Extract numbered claims from a USPTO publication XML document."""
     claim_texts: list[str] = []
@@ -115,18 +100,64 @@ def _extract_xml_claims(root: ET.Element) -> str | None:
     return "\n".join(claim_texts) or None
 
 
-def _get_abstract(raw: dict) -> str:
-    """Retrieve and extract the abstract from the USPTO publication XML."""
+def _get_publication_text(raw: dict) -> tuple[str, str | None]:
+    """Retrieve abstract and claims from the associated publication XML."""
+    application_number = str(
+        raw.get("applicationNumberText") or ""
+    ).strip()
+
+    if not application_number:
+        return "", None
+
+    try:
+        documents_url = (
+            "https://api.uspto.gov/api/v1/patent/applications/"
+            f"{application_number}/associated-documents"
+        )
+
+        response = requests.get(
+            documents_url,
+            headers=_build_headers(),
+            timeout=30,
+        )
+        response.raise_for_status()
+
+        data = response.json()
+        records = data.get("patentFileWrapperDataBag") or []
+
+        for record in records:
+            document_metadata = (
+                record.get("pgpubDocumentMetaData") or {}
+            )
+            xml_url = document_metadata.get("fileLocationURI")
+
+            if not xml_url:
+                continue
+
+            xml_text = _get_xml(xml_url)
+            root = ET.fromstring(xml_text)
+
+            abstract_text = _extract_xml_text(root, "abstract")
+            claims_text = _extract_xml_claims(root)
+
+            if abstract_text or claims_text:
+                return abstract_text, claims_text
+
+        return "", None
+
+    except Exception as exc:
+        log.warning(
+            "USPTO publication text retrieval failed for %s: %s",
+            application_number,
+            exc,
+        )
+        return "", None
+
+
+def _get_metadata_abstract(raw: dict) -> str:
+    """Return the abstract supplied directly by the search response, if any."""
 
     metadata = raw.get("applicationMetaData") or {}
-
-    print(
-        "ABSTRACT PATH:",
-        "direct abstract present =",
-        bool(metadata.get("abstractText")),
-        "application number =",
-        raw.get("applicationNumberText"),
-    )
 
     # Some ODP records may contain the abstract directly.
     abstract = metadata.get("abstractText")
@@ -154,90 +185,7 @@ def _get_abstract(raw: dict) -> str:
         if result:
             return result
 
-    # Search results normally do not contain the abstract.
-    # Retrieve the associated PGPub publication XML instead.
-    application_number = (
-        raw.get("applicationNumberText") or ""
-    ).strip()
-
-    if not application_number:
-        log.warning(
-            "USPTO abstract: application number missing"
-        )
-        return ""
-
-    try:
-        documents_url = (
-            "https://api.uspto.gov/api/v1/patent/applications/"
-            f"{application_number}/associated-documents"
-        )
-
-        response = requests.get(
-            documents_url,
-            headers=_build_headers(),
-            timeout=30,
-        )
-        response.raise_for_status()
-
-        data = response.json()
-
-        records = data.get("patentFileWrapperDataBag") or []
-
-        if not records:
-            log.warning(
-                "USPTO abstract: no associated documents for %s",
-                application_number,
-            )
-            return ""
-
-        document_metadata = (
-            records[0].get("pgpubDocumentMetaData") or {}
-        )
-
-        xml_url = document_metadata.get("fileLocationURI")
-
-        if not xml_url:
-            log.warning(
-                "USPTO abstract: PGPub XML URL missing for %s",
-                application_number,
-            )
-            return ""
-
-        xml_text = _get_xml(xml_url)
-        _inspect_claim_elements(xml_text)
-        root = ET.fromstring(xml_text)
-
-        claim_elements = [
-            element.tag.split("}")[-1]
-            for element in root.iter()
-            if "claim" in element.tag.split("}")[-1].lower()
-        ]
-
-        print("XML root:", root.tag.split("}")[-1])
-        print("Claim-related elements:", sorted(set(claim_elements)))
-        print("Claim element count:", len(claim_elements))
-
-        root = ET.fromstring(xml_text)
-
-        abstract_text = _extract_xml_text(
-            root,
-            "abstract",
-        )
-
-        log.info(
-            "USPTO abstract extracted: %d characters",
-            len(abstract_text),
-        )
-
-        return abstract_text
-
-    except Exception as exc:
-        log.warning(
-            "USPTO abstract retrieval failed for %s: %s",
-            application_number,
-            exc,
-        )
-        return ""
+    return ""
 
 
 def _get_continuity_family_id(raw: dict) -> str | None:
@@ -289,18 +237,6 @@ def _build_patent_record(raw: dict) -> PatentRecord | None:
     """Convert one USPTO ODP record into PatentRecord."""
 
     metadata = raw.get("applicationMetaData") or {}
-
-    print(
-        "USPTO RAW RECORD:",
-        "publication =",
-        raw.get("applicationMetaData", {}).get("earliestPublicationNumber"),
-        "application =",
-        raw.get("applicationNumberText"),
-        "abstract_metadata_type =",
-        type(raw.get("applicationMetaData", {}).get("abstractText")).__name__,
-        "abstract_metadata_present =",
-        bool(raw.get("applicationMetaData", {}).get("abstractText")),
-    )
 
     uspc_class = (
         str(metadata.get("class") or "").strip()
@@ -360,17 +296,29 @@ def _build_patent_record(raw: dict) -> PatentRecord | None:
         return None
 
     try:
-        abstract = _get_abstract(raw)
+        # Preserve the abstract already supplied by the search response.
+        abstract = _get_metadata_abstract(raw)
+        claims_text = None
+
+        # One publication-XML retrieval supplies the claims and, when the
+        # search response had no abstract, the abstract as well.
+        if raw.get("applicationNumberText"):
+            xml_abstract, claims_text = _get_publication_text(raw)
+
+            if not abstract:
+                abstract = xml_abstract
 
         log.info(
-            "USPTO abstract extracted: %d characters",
+            "USPTO publication text: abstract=%d chars, claims=%d chars",
             len(abstract),
+            len(claims_text or ""),
         )
 
         return PatentRecord(
             patent_id=str(patent_id),
             patent_title=str(title),
             patent_abstract=abstract or None,
+            patent_claims=claims_text or None,
             patent_type=patent_type or None,
             patent_date=str(patent_date) if patent_date else None,
             continuity_family_id=continuity_family_id,

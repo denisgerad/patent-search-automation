@@ -24,6 +24,7 @@ import numpy as np
 
 from app.config import settings
 from models.schemas import PatentRecord, RankedPatent
+from services.patent_text_status import get_patent_text_status
 
 logger = logging.getLogger(__name__)
 
@@ -294,13 +295,13 @@ def _calculate_importance_score(
         if matched:
             matched_weight += weight
 
-    logger.warning(
+    logger.debug(
         "IMPORTANCE HITS | patent=%s | hits=%s",
         patent.patent_id,
         concept_hits,
     )
 
-    logger.warning(
+    logger.debug(
         "IMPORTANCE CONCEPTS | patent=%s | concepts=%s",
         patent.patent_id,
         [
@@ -317,7 +318,7 @@ def _calculate_importance_score(
     if total_weight <= 0:
         return 0.0, concept_hits
 
-    logger.warning(
+    logger.debug(
         "IMPORTANCE DEBUG | patent=%s | score=%.4f | "
         "matched_weight=%.1f | total_weight=%.1f | hits=%s",
         patent.patent_id,
@@ -387,6 +388,27 @@ def _apply_importance_score(
         multiplier *= 0.75
 
     return hybrid * multiplier
+
+
+def _apply_importance_score_if_text_available(
+    patent: PatentRecord,
+    hybrid: float,
+    importance_score: float,
+    importance_hits: dict[str, bool],
+    search_strategy=None,
+) -> float:
+    """Skip importance adjustment when abstract and claims are unavailable."""
+    text_status, _ = get_patent_text_status(patent)
+
+    if text_status == "insufficient_text":
+        return hybrid
+
+    return _apply_importance_score(
+        hybrid,
+        importance_score,
+        importance_hits,
+        search_strategy,
+    )
 
 
 def rank(
@@ -576,6 +598,20 @@ def rank(
     importance_hits_list: list[dict] = []
 
     for i, patent in enumerate(patents_f):
+        text_status, _ = get_patent_text_status(patent)
+
+        # Without an abstract or claims, concept coverage is unverified.
+        # Preserve the existing hybrid score; do not apply the importance
+        # multiplier or critical-concept penalty to this record.
+        if text_status == "insufficient_text":
+            importance_scores[i] = 0.0
+            importance_hits_list.append({})
+            logger.info(
+                "IMPORTANCE SKIPPED | patent=%s | reason=insufficient_text",
+                patent.patent_id,
+            )
+            continue
+
         importance_score, importance_hits = (
             _calculate_importance_score(
                 patent,
@@ -583,17 +619,11 @@ def rank(
             )
         )
 
-        logger.info(
-            "IMPORTANCE DETAIL | patent=%s | score=%.4f | hits=%s",
-            patent.patent_id,
-            importance_score,
-            importance_hits,
-        )
-
         importance_scores[i] = importance_score
         importance_hits_list.append(importance_hits)
 
-        hybrid[i] = _apply_importance_score(
+        hybrid[i] = _apply_importance_score_if_text_available(
+            patent,
             float(hybrid[i]),
             importance_score,
             importance_hits,
@@ -685,6 +715,8 @@ def rank(
     for i in sorted_idx:
         patent = patents_selected[i]
 
+        text_status, text_characters = get_patent_text_status(patent)
+
         family_id = getattr(
             patent,
             "continuity_family_id",
@@ -716,10 +748,14 @@ def rank(
                 ),
                 concept_hits=coverage_selected[i]["concept_hits"],
                 search_paths=list(patent.search_paths),
-                importance_score=float(
-                    importance_selected[i]
+                importance_score=(
+                    None
+                    if text_status == "insufficient_text"
+                    else float(importance_selected[i])
                 ),
                 importance_hits=importance_hits_selected[i],
+                text_status=text_status,
+                text_characters=text_characters,
             )
         )
 
@@ -740,6 +776,8 @@ def rank(
                 continue
 
             patent = patents_all[original_i]
+
+            text_status, text_characters = get_patent_text_status(patent)
 
             family_id = getattr(
                 patent,
@@ -766,15 +804,26 @@ def rank(
                     ),
                     concept_hits=coverage_all[original_i]["concept_hits"],
                     search_paths=list(patent.search_paths),
-                    importance_score=float(
-                        importance_scores[original_i]
+                    importance_score=(
+                        None
+                        if text_status == "insufficient_text"
+                        else float(importance_scores[original_i])
                     ),
                     importance_hits=importance_hits_list[original_i],
+                    text_status=text_status,
+                    text_characters=text_characters,
                 )
             )
 
             if len(ranked) >= k:
                 break
+
+    # Re-sort the combined results after fallback candidates are added.
+    # All hybrid_score values already include the applicable scoring adjustments.
+    ranked.sort(
+        key=lambda item: item.hybrid_score,
+        reverse=True,
+    )
 
     logger.info(
         "Family-aware ranking: %d distinct patent families returned "

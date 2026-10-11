@@ -129,33 +129,39 @@ def filter_by_threshold(
 
 
 def compute_token_coverage(patent, tokens) -> dict:
-    """
-    Compute how many critical token groups are represented in the patent.
-
-    Tokens from the same domain concept count as one group — "infrared" and
-    "IR sensor" both satisfy the sensor concept, not two wins.
-
-    Args:
-        patent: PatentRecord — patent to evaluate.
-        tokens: ExtractedTokens — must have a populated concept_groups dict.
-
-    Returns:
-        dict with keys: coverage (float 0–1), matched_concepts (int),
-        total_concepts (int), concept_hits (dict[str, bool]).
-    """
-    text = (
-        f"{patent.patent_title or ''} {patent.patent_abstract or ''}"
-    ).lower()
+    """Compute concept coverage across the title, abstract, and claims."""
+    text_parts = [
+        patent.patent_title or "",
+        patent.patent_abstract or "",
+        getattr(patent, "patent_claims", None) or "",
+    ]
+    text = " ".join(text_parts).lower()
+    text = text.replace("-", " ").replace("_", " ")
 
     concept_hits: dict[str, bool] = {}
+
     for concept, data in tokens.concept_groups.items():
-        terms = [t.lower() for t in data.get("terms", [])]
-        synonyms = [s.lower() for s in data.get("patent_synonyms", [])]
-        concept_hits[concept] = any(t in text for t in terms + synonyms)
+        terms = [
+            str(term).lower().replace("-", " ").replace("_", " ")
+            for term in data.get("terms", [])
+        ]
+        synonyms = [
+            str(term).lower().replace("-", " ").replace("_", " ")
+            for term in data.get("patent_synonyms", [])
+        ]
+
+        concept_hits[concept] = any(
+            term in text
+            for term in terms + synonyms
+            if term.strip()
+        )
 
     total_concepts = len(concept_hits)
     matched_concepts = sum(concept_hits.values())
-    coverage = matched_concepts / total_concepts if total_concepts else 0.0
+    coverage = (
+        matched_concepts / total_concepts
+        if total_concepts else 0.0
+    )
 
     return {
         "coverage": coverage,

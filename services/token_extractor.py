@@ -157,6 +157,101 @@ DOMAIN_TAXONOMY: dict[str, dict] = {
         "terms": ["radar", "radar sensor", "radar-based"],
         "patent_synonyms": ["radio detection system", "radar array"],
     },
+    # ── Fraud detection concepts ─────────────────────────────────────
+    "fraud_detection_scoring": {
+        "type": "task",
+        "terms": [
+            "fraud detection", "fraud score", "fraud risk score",
+            "fraud risk assessment", "risk scoring",
+        ],
+        "patent_synonyms": [
+            "fraud risk evaluation", "transaction risk scoring",
+            "fraud likelihood score",
+        ],
+    },
+    "transaction_analysis": {
+        "type": "domain",
+        "terms": [
+            "transaction information",
+            "transaction data",
+            "transaction analysis",
+            "transaction monitoring",
+        ],
+        "patent_synonyms": [
+            "payment transaction analysis",
+            "transaction attributes",
+            "payment activity monitoring",
+            "transaction features",
+            "transaction event data",
+            "payment transaction data",
+            "transaction risk assessment",
+            "transaction attributes analysis",
+        ],
+    },
+    "device_fingerprinting": {
+        "type": "sensor",
+        "terms": [
+            "device characteristics",
+            "device fingerprint",
+            "device fingerprinting",
+            "device identification",
+        ],
+        "patent_synonyms": [
+            "device attributes",
+            "device identity signals",
+            "device-based risk indicators",
+            "device identifier",
+            "device identifiers",
+            "device profiling",
+            "device identification signals",
+        ],
+    },
+    "behavioral_analysis": {
+        "type": "domain",
+        "terms": [
+            "behavioral patterns",
+            "behavioral analysis",
+            "user behavior",
+            "user's established behaviour",
+            "user behavior patterns",
+            "behavioral baseline",
+            "historical behavior",
+            "historical behavioral patterns",
+        ],
+        "patent_synonyms": [
+            "user activity patterns",
+            "historical user activity",
+            "behavior profile",
+            "behavioral characteristics",
+            "behavioral analytics",
+            "behavioral pattern recognition",
+            "transaction behavior patterns",
+            "observed transaction behavior",
+            "account usage over time",
+            "user activity history",
+            "user behavioral baseline",
+        ],
+    },
+    "dynamic_threshold": {
+        "type": "task",
+        "terms": [
+            "dynamic threshold",
+            "adaptive threshold",
+            "detection threshold",
+            "threshold changes",
+            "threshold adjustment",
+        ],
+        "patent_synonyms": [
+            "adaptive decision boundary",
+            "variable risk threshold",
+            "context-dependent threshold",
+            "dynamic risk threshold",
+            "adaptive fraud threshold",
+            "variable detection threshold",
+            "threshold adaptation",
+            "threshold adjustment based on behavior",
+        ],
+    },
 }
 
 

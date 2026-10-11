@@ -5,6 +5,7 @@ from models.schemas import PatentRecord, SearchConcept, SearchStrategy
 from services.ranking_service import (
     _calculate_importance_score,
     _apply_importance_score,
+    _apply_importance_score_if_text_available,
 )
 
 
@@ -174,6 +175,92 @@ class TestImportanceScoring(unittest.TestCase):
 
         self.assertEqual(score, 0.0)
         self.assertFalse(hits["Adaptive detection threshold"])
+
+    def test_explicit_terminology_variant_matches_patent(self):
+        from services.search_terminology import add_terminology_variants
+
+        patent = make_patent(
+            title="Transaction Risk Evaluation",
+            abstract=(
+                "The system compares customer activity against "
+                "an established personal baseline and applies a "
+                "risk based threshold to the comparison."
+            ),
+        )
+
+        original_terms = [
+            "adaptive threshold",
+            "dynamic threshold",
+            "variable detection threshold",
+        ]
+
+        expanded_terms = add_terminology_variants(
+            "Adaptive detection threshold",
+            original_terms,
+        )
+
+        strategy = make_strategy([
+            SearchConcept(
+                name="Adaptive detection threshold",
+                importance="important",
+                terms=expanded_terms,
+            ),
+        ])
+
+        score, hits = _calculate_importance_score(
+            patent,
+            strategy,
+        )
+
+        self.assertGreater(score, 0.0)
+        self.assertTrue(
+            hits["Adaptive detection threshold"]
+        )
+
+    def test_title_only_patent_preserves_hybrid_score(self):
+        patent = make_patent(
+            title="Adaptive transaction fraud detection",
+        )
+        strategy = make_strategy([
+            SearchConcept(
+                name="Dynamic fraud scoring",
+                importance="critical",
+                terms=["fraud score"],
+            ),
+        ])
+
+        result = _apply_importance_score_if_text_available(
+            patent=patent,
+            hybrid=0.8,
+            importance_score=0.0,
+            importance_hits={"Dynamic fraud scoring": False},
+            search_strategy=strategy,
+        )
+
+        self.assertEqual(result, 0.8)
+
+    def test_patent_with_text_keeps_existing_importance_adjustment(self):
+        patent = make_patent(
+            title="Transaction analysis",
+            abstract="The system analyses transaction records.",
+        )
+        strategy = make_strategy([
+            SearchConcept(
+                name="Dynamic fraud scoring",
+                importance="critical",
+                terms=["fraud score"],
+            ),
+        ])
+
+        result = _apply_importance_score_if_text_available(
+            patent=patent,
+            hybrid=0.8,
+            importance_score=0.0,
+            importance_hits={"Dynamic fraud scoring": False},
+            search_strategy=strategy,
+        )
+
+        self.assertAlmostEqual(result, 0.8 * 0.60 * 0.75)
 
 
 if __name__ == "__main__":

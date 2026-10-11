@@ -617,6 +617,58 @@ def build_search_paths_from_structure(
             "SEARCH PATH: %s",
             json.dumps(path, indent=2, ensure_ascii=False),
         )
+
+    # ------------------------------------------------------------------
+    # 6. CORE + SENSOR + OBJECT
+    # ------------------------------------------------------------------
+    if core_expr and sensor_expr and object_expr:
+        path = {
+            "name": "Core + Sensor + Object",
+            "roles": ["core_system", "sensors", "objects"],
+            "quality_level": "focused",
+            "recall_priority": 3,
+            "precision_priority": 8,
+            "purpose": (
+                "Search the core system together with its input "
+                "characteristics and the objects being processed."
+            ),
+            "expression": _combine_roles(
+                core_expr,
+                sensor_expr,
+                object_expr,
+            ),
+        }
+        paths.append(path)
+
+    # ------------------------------------------------------------------
+    # 7. APPLICATION + CORE + SENSOR + OBJECT
+    # ------------------------------------------------------------------
+    if application_expr and core_expr and sensor_expr and object_expr:
+        path = {
+            "name": "Application + Core + Sensor + Object",
+            "roles": [
+                "application",
+                "core_system",
+                "sensors",
+                "objects",
+            ],
+            "quality_level": "focused",
+            "recall_priority": 2,
+            "precision_priority": 9,
+            "purpose": (
+                "Search for the invention in its application domain, "
+                "requiring its core system, input characteristics, "
+                "and processed objects."
+            ),
+            "expression": _combine_roles(
+                application_expr,
+                core_expr,
+                sensor_expr,
+                object_expr,
+            ),
+        }
+        paths.append(path)
+
     return paths
 
 def generate_invention_structure(

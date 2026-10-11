@@ -95,8 +95,12 @@ class RankedPatent(BaseModel):
     search_paths: list[str] = Field(default_factory=list)
 
     # Importance-aware relevance
-    importance_score: float = 0.0
+    importance_score: float | None = None
     importance_hits: dict = Field(default_factory=dict)
+
+    # Text availability for interpreting concept coverage
+    text_status: str = "unknown"
+    text_characters: int = 0
 
 
 class PipelineResult(BaseModel):

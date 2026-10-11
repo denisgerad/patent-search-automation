@@ -25,6 +25,14 @@ if not logger.handlers:
     logger.addHandler(handler)
 logger.setLevel(logging.DEBUG)
 
+ranking_logger = logging.getLogger("services.ranking_service")
+ranking_logger.setLevel(logging.DEBUG)
+
+if not ranking_logger.handlers:
+    ranking_logger.addHandler(logging.StreamHandler(sys.stdout))
+
+ranking_logger.propagate = False
+
 # Make sure the project root is on the path regardless of cwd
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
@@ -165,7 +173,7 @@ with st.sidebar:
         "which chains stages 1–3 automatically."
     )
 
-    if st.button("🔄 Reset / New query", use_container_width=True):
+    if st.button("🔄 Reset / New query", width="stretch"):
         logger.info("Reset button clicked — resetting session state")
         _reset()
         st.rerun()
@@ -816,7 +824,7 @@ with st.expander("Build Search Strategy", expanded=True):
     if st.button(
         "💾 Build Search Strategy",
         type="primary",
-        use_container_width=True,
+        width="stretch",
         key="build_search_strategy",
     ):
         _key_points = [
@@ -909,7 +917,7 @@ with st.expander("Build Search Strategy", expanded=True):
 
             if st.button(
                 "✅ Approve Search Strategy",
-                use_container_width=True,
+                width="stretch",
                 key="approve_search_strategy",
             ):
                 st.session_state.search_strategy_approved = True
@@ -1247,10 +1255,10 @@ with st.expander("📋 JSON Format  *(optional — overrides Mistral expansion)*
         st.caption("_No JSON pasted — Mistral expansion will run normally._")
 
 col1, col2, col3 = st.columns([2, 2, 1])
-run_to_top20 = col1.button("▶ Run to Top 20", type="primary", use_container_width=True)
-run_claude   = col2.button("🤖 Send Ranked Results to Claude", use_container_width=True,
+run_to_top20 = col1.button("▶ Run to Top 20", type="primary", width="stretch")
+run_claude   = col2.button("🤖 Send Ranked Results to Claude", width="stretch",
                             disabled=(st.session_state.stage < 3))
-col3.button("🔄 Reset", on_click=_reset, use_container_width=True)
+col3.button("🔄 Reset", on_click=_reset, width="stretch")
 
 if st.session_state.error:
     st.error(st.session_state.error)
@@ -1573,6 +1581,17 @@ def _run_rank(q: str, patents: list, k: int) -> list:
             }
             for c in getattr(search_strategy, "concepts", [])
         ],
+    )
+
+    logger.warning(
+        "RANK TOKEN DEBUG | tokens_present=%s | token_type=%s | "
+        "taxonomy_miss=%s | concept_groups=%s | critical_count=%d",
+        tokens is not None,
+        type(tokens).__name__ if tokens is not None else None,
+        getattr(tokens, "taxonomy_miss", None),
+        list(getattr(tokens, "concept_groups", {}).keys())
+        if tokens is not None else [],
+        len(critical),
     )
 
     return rank(
@@ -1957,7 +1976,7 @@ with tab_expand:
                 {"Category": "Technology preservation", "Score": f"{category_scores.get('technology_preservation', 0)}/20"},
                 {"Category": "Generic leakage control", "Score": f"{category_scores.get('generic_leakage_control', 0)}/20"},
             ])
-            st.dataframe(category_df, use_container_width=True, hide_index=True)
+            st.dataframe(category_df, width="stretch", hide_index=True)
             
             # Additional metrics
             st.markdown("**Additional Metrics:**")
@@ -1971,7 +1990,7 @@ with tab_expand:
                 {"Metric": "Boolean fitness", "Result": metrics["boolean_fitness"]},
                 {"Metric": "Token preservation", "Result": f"{int(metrics['token_preservation_ratio']*100)}%"},
             ])
-            st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+            st.dataframe(metrics_df, width="stretch", hide_index=True)
             
             # Detailed breakdown
             with st.expander("📊 Detailed Breakdown", expanded=False):
@@ -2040,7 +2059,7 @@ with tab_search:
 
             st.dataframe(
                 _path_df,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -2080,7 +2099,7 @@ with tab_search:
             for p in st.session_state.unique_patents
         ]
         df = pd.DataFrame(rows)
-        st.dataframe(df, use_container_width=True, hide_index=True,
+        st.dataframe(df, width="stretch", hide_index=True,
                      column_config={"title": st.column_config.TextColumn(width="large")})
         st.divider()
         st.subheader("Readable titles")
@@ -2142,7 +2161,7 @@ with tab_search:
 
         st.dataframe(
             pd.DataFrame(cpc_rows),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -2249,7 +2268,7 @@ with tab_search:
             if selected_patent_rows:
                 st.dataframe(
                     pd.DataFrame(selected_patent_rows),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
 
@@ -2284,7 +2303,7 @@ with tab_search:
 
         st.dataframe(
             pd.DataFrame(uspc_class_rows),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -2314,7 +2333,7 @@ with tab_search:
 
         st.dataframe(
             pd.DataFrame(uspc_subclass_rows),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -2377,7 +2396,7 @@ with tab_search:
         if class_rows:
             st.dataframe(
                 pd.DataFrame(class_rows),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -2438,7 +2457,7 @@ with tab_search:
         if subclass_rows:
             st.dataframe(
                 pd.DataFrame(subclass_rows),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -2886,7 +2905,7 @@ with tab_search:
 
         st.dataframe(
             pd.DataFrame(refinement_rows),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -3167,7 +3186,7 @@ with tab_search:
 
                 st.dataframe(
                     pd.DataFrame(refined_rows),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
 
@@ -3278,7 +3297,7 @@ with tab_search:
                                         }
                                         for p in refined_results
                                     ]),
-                                    use_container_width=True,
+                                    width="stretch",
                                     hide_index=True,
                                 )
                 else:
@@ -3324,7 +3343,7 @@ with tab_search:
 
         st.dataframe(
             pd.DataFrame(ipc_rows),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     else:
@@ -3364,10 +3383,24 @@ with tab_rank:
                 "title": "\n".join(textwrap.wrap(rp.patent.patent_title or "", width=80)),
                 "type": rp.patent.patent_type or "—",
                 "date": rp.patent.patent_date or "—",
-                "hybrid": round(rp.hybrid_score, 4),
-                "importance": round(rp.importance_score, 4),
-                "cosine": round(rp.cosine_score, 4),
-                "bm25": round(rp.bm25_score, 4),
+                "hybrid": (
+                    round(rp.hybrid_score, 4)
+                    if rp.hybrid_score is not None else None
+                ),
+                "importance": (
+                    round(rp.importance_score, 4)
+                    if rp.importance_score is not None
+                    else None
+                ),
+                "text_status": rp.text_status,
+                "cosine": (
+                    round(rp.cosine_score, 4)
+                    if rp.cosine_score is not None else None
+                ),
+                "bm25": (
+                    round(rp.bm25_score, 4)
+                    if rp.bm25_score is not None else None
+                ),
                 "concept_coverage": (
                     ", ".join(
                         name
@@ -3381,7 +3414,7 @@ with tab_rank:
 
         df = pd.DataFrame(rows)
         st.dataframe(
-            df, use_container_width=True, hide_index=True,
+            df, width="stretch", hide_index=True,
             column_config={
                 "title":  st.column_config.TextColumn(width="large"),
                 "hybrid": st.column_config.ProgressColumn(
@@ -3434,10 +3467,15 @@ with tab_rank:
             else:
                 st.caption("🔴 No group terms matched in this patent's title or abstract.")
         st.markdown(f"**Type:** {p.patent_type or '—'}   **Date:** {p.patent_date or '—'}")
-        st.markdown(f"**Hybrid:** `{rp.hybrid_score:.4f}`  |  "
-                    f"**Importance:** `{rp.importance_score:.4f}`  |  "
-                    f"**Cosine:** `{rp.cosine_score:.4f}`  |  "
-                    f"**BM25:** `{rp.bm25_score:.4f}`")
+        def format_score(value):
+            return f"{value:.4f}" if value is not None else "N/A"
+
+        st.markdown(
+            f"**Hybrid:** `{format_score(rp.hybrid_score)}`  |  "
+            f"**Importance:** `{format_score(rp.importance_score)}`  |  "
+            f"**Cosine:** `{format_score(rp.cosine_score)}`  |  "
+            f"**BM25:** `{format_score(rp.bm25_score)}`"
+        )
 
         if rp.importance_hits:
             matched_concepts = [
@@ -3491,7 +3529,7 @@ with tab_claude:
             try:
                 parsed = json.loads(st.session_state.comparison)
                 comp_df = pd.DataFrame(parsed)
-                st.dataframe(comp_df, use_container_width=True, hide_index=True)
+                st.dataframe(comp_df, width="stretch", hide_index=True)
             except (json.JSONDecodeError, Exception):
                 st.text_area("Raw comparison output", st.session_state.comparison,
                              height=400)

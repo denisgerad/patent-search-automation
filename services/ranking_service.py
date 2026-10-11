@@ -257,7 +257,6 @@ def _calculate_importance_score(
             )
             if str(term).strip()
         ]
-
         if not name or not terms:
             continue
 
@@ -295,14 +294,43 @@ def _calculate_importance_score(
         if matched:
             matched_weight += weight
 
+    logger.warning(
+        "IMPORTANCE HITS | patent=%s | hits=%s",
+        patent.patent_id,
+        concept_hits,
+    )
+
+    logger.warning(
+        "IMPORTANCE CONCEPTS | patent=%s | concepts=%s",
+        patent.patent_id,
+        [
+            {
+                "name": concept.name,
+                "importance": concept.importance,
+                "operator": concept.operator,
+                "terms": concept.terms,
+            }
+            for concept in search_strategy.concepts
+        ],
+    )
+
     if total_weight <= 0:
         return 0.0, concept_hits
+
+    logger.warning(
+        "IMPORTANCE DEBUG | patent=%s | score=%.4f | "
+        "matched_weight=%.1f | total_weight=%.1f | hits=%s",
+        patent.patent_id,
+        matched_weight / total_weight if total_weight else 0.0,
+        matched_weight,
+        total_weight,
+        concept_hits,
+    )
 
     return (
         matched_weight / total_weight,
         concept_hits,
     )
-
 
 def _apply_importance_score(
     hybrid: float,
@@ -553,6 +581,13 @@ def rank(
                 patent,
                 search_strategy,
             )
+        )
+
+        logger.info(
+            "IMPORTANCE DETAIL | patent=%s | score=%.4f | hits=%s",
+            patent.patent_id,
+            importance_score,
+            importance_hits,
         )
 
         importance_scores[i] = importance_score

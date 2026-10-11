@@ -83,10 +83,50 @@ def _extract_xml_text(
     return ""
 
 
+def _inspect_claim_elements(xml_text: str) -> None:
+    """Temporarily report claim-related XML element names."""
+    root = ET.fromstring(xml_text)
+
+    matches = []
+    for element in root.iter():
+        local_name = element.tag.split("}")[-1].lower()
+        if "claim" in local_name:
+            matches.append(local_name)
+
+    print("XML root:", root.tag.split("}")[-1])
+    print("Claim-related element names:", sorted(set(matches)))
+    print("Claim-related element count:", len(matches))
+
+
+def _extract_xml_claims(root: ET.Element) -> str | None:
+    """Extract numbered claims from a USPTO publication XML document."""
+    claim_texts: list[str] = []
+
+    for element in root.iter():
+        local_name = element.tag.split("}")[-1].lower()
+
+        if local_name != "claim":
+            continue
+
+        text = " ".join("".join(element.itertext()).split()).strip()
+        if text:
+            claim_texts.append(text)
+
+    return "\n".join(claim_texts) or None
+
+
 def _get_abstract(raw: dict) -> str:
     """Retrieve and extract the abstract from the USPTO publication XML."""
 
     metadata = raw.get("applicationMetaData") or {}
+
+    print(
+        "ABSTRACT PATH:",
+        "direct abstract present =",
+        bool(metadata.get("abstractText")),
+        "application number =",
+        raw.get("applicationNumberText"),
+    )
 
     # Some ODP records may contain the abstract directly.
     abstract = metadata.get("abstractText")
@@ -164,6 +204,18 @@ def _get_abstract(raw: dict) -> str:
             return ""
 
         xml_text = _get_xml(xml_url)
+        _inspect_claim_elements(xml_text)
+        root = ET.fromstring(xml_text)
+
+        claim_elements = [
+            element.tag.split("}")[-1]
+            for element in root.iter()
+            if "claim" in element.tag.split("}")[-1].lower()
+        ]
+
+        print("XML root:", root.tag.split("}")[-1])
+        print("Claim-related elements:", sorted(set(claim_elements)))
+        print("Claim element count:", len(claim_elements))
 
         root = ET.fromstring(xml_text)
 
@@ -237,6 +289,18 @@ def _build_patent_record(raw: dict) -> PatentRecord | None:
     """Convert one USPTO ODP record into PatentRecord."""
 
     metadata = raw.get("applicationMetaData") or {}
+
+    print(
+        "USPTO RAW RECORD:",
+        "publication =",
+        raw.get("applicationMetaData", {}).get("earliestPublicationNumber"),
+        "application =",
+        raw.get("applicationNumberText"),
+        "abstract_metadata_type =",
+        type(raw.get("applicationMetaData", {}).get("abstractText")).__name__,
+        "abstract_metadata_present =",
+        bool(raw.get("applicationMetaData", {}).get("abstractText")),
+    )
 
     uspc_class = (
         str(metadata.get("class") or "").strip()

@@ -57,6 +57,7 @@ from services.search_strategy_service import (
     build_uspto_search_strings,
     build_uspto_proximity_strings,
 )
+from services.search_terminology import add_terminology_variants
 
 # ── page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -758,6 +759,9 @@ with st.expander("Build Search Strategy", expanded=True):
             for term in _terms_raw.splitlines()
             if term.strip()
         ]
+
+        # Append explicit variants while preserving the reviewed terms.
+        _terms = add_terminology_variants(_name.strip(), _terms)
 
         if _name.strip() or _terms:
             _concepts.append(
@@ -3436,15 +3440,37 @@ with tab_rank:
                     f"**BM25:** `{rp.bm25_score:.4f}`")
 
         if rp.importance_hits:
-            st.markdown(
-                "**Concept coverage:** "
-                + ", ".join(
-                    name
-                    for name, hit in rp.importance_hits.items()
-                    if hit
-                )
-                or "—"
+            matched_concepts = [
+                name
+                for name, hit in rp.importance_hits.items()
+                if hit
+            ]
+            unmatched_concepts = [
+                name
+                for name, hit in rp.importance_hits.items()
+                if not hit
+            ]
+
+            st.markdown("### Search Strategy Match Evidence")
+
+            st.write(
+                f"**Matched concepts:** {len(matched_concepts)} "
+                f"of {len(rp.importance_hits)}"
             )
+
+            with st.expander("Matched concepts", expanded=True):
+                if matched_concepts:
+                    for name in matched_concepts:
+                        st.write(f"✅ {name}")
+                else:
+                    st.write("No concepts matched.")
+
+            with st.expander("Unmatched concepts"):
+                if unmatched_concepts:
+                    for name in unmatched_concepts:
+                        st.write(f"— {name}")
+                else:
+                    st.write("All evaluated concepts matched.")
         if p.patent_abstract:
             with st.expander("Abstract"):
                 st.write(p.patent_abstract)

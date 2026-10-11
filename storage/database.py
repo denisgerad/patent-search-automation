@@ -70,6 +70,7 @@ patents_table = Table(
     Column("patent_id",       String(64),   primary_key=True),
     Column("patent_title",    Text,         nullable=False),
     Column("patent_abstract", Text,         nullable=True),
+    Column("patent_claims",   LONGTEXT,     nullable=True),
     Column("patent_type",     String(64),   nullable=True),
     Column("patent_date",     String(16),   nullable=True),  # e.g. '2023-05-09'
     Column(

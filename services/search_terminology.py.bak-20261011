@@ -1,0 +1,71 @@
+"""Explicit terminology variants for patent-search concepts."""
+
+import re
+
+
+def _normalize_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+
+
+TERMINOLOGY_VARIANTS = {
+    "dynamic fraud scoring": [
+        "transaction risk rating",
+        "risk based transaction scoring",
+    ],
+    "context aware fraud detection": [
+        "transaction context analysis",
+        "context dependent fraud detection",
+    ],
+    "adaptive detection threshold": [
+        "adaptive decision threshold",
+        "risk based threshold",
+        "transaction risk threshold",
+    ],
+    "behavioral pattern analysis": [
+        "customer behavioral profile",
+        "transaction behavior patterns",
+    ],
+    "transaction information analysis": [
+        "transaction attributes",
+        "payment transaction data",
+    ],
+    "device characteristics fingerprinting": [
+        "device attributes",
+        "device fingerprint",
+        "device profiling",
+    ],
+    "historical user behavior modeling": [
+        "historical transaction behavior",
+        "user activity history",
+    ],
+    "multi factor fraud signal fusion": [
+        "combined fraud indicators",
+        "multi factor risk scoring",
+    ],
+    "user specific baseline profiling": [
+        "individual behavioral baseline",
+        "personalized risk profile",
+    ],
+    "anomaly detection in financial transactions": [
+        "transaction anomalies",
+        "financial transaction outliers",
+    ],
+}
+
+
+def add_terminology_variants(name: str, terms: list[str]) -> list[str]:
+    """Preserve original terms and append recognized concept variants."""
+    result = []
+    seen = set()
+
+    variants = TERMINOLOGY_VARIANTS.get(_normalize_name(name), [])
+
+    for term in [*terms, *variants]:
+        cleaned = str(term).strip()
+        key = cleaned.casefold()
+
+        if cleaned and key not in seen:
+            result.append(cleaned)
+            seen.add(key)
+
+    return result

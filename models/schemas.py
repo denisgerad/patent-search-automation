@@ -17,6 +17,7 @@ class PatentRecord(BaseModel):
     patent_id: str
     patent_title: str
     patent_abstract: Optional[str] = None
+    patent_claims: Optional[str] = None
     patent_type: Optional[str] = None
     patent_date: Optional[str] = None
     continuity_family_id: Optional[str] = None

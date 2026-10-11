@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -61,6 +61,7 @@ def _row_to_record(row) -> PatentRecord:
         patent_id=row.patent_id,
         patent_title=row.patent_title,
         patent_abstract=row.patent_abstract,
+        patent_claims=row.patent_claims,
         patent_type=row.patent_type,
         patent_date=row.patent_date,
     )
@@ -81,15 +82,28 @@ def save_patents(patents: list[PatentRecord], query: str) -> None:
         return
 
     # ── MySQL upsert ─────────────────────────────────────────────────────────
-    rows = [p.model_dump(exclude={"created_at"}, exclude_none=False) for p in patents]
-    # model_dump includes all PatentRecord fields; column names match exactly.
-    rows = [{k: v for k, v in r.items() if k != "created_at"} for r in rows]
+    # Only send columns that are declared in the MySQL patents table.
+    # The JSON cache below still preserves the complete PatentRecord.
+    db_columns = set(patents_table.c.keys())
+
+    rows = [
+        {
+            key: value
+            for key, value in patent.model_dump(exclude_none=False).items()
+            if key in db_columns and key != "created_at"
+        }
+        for patent in patents
+    ]
 
     with engine.begin() as conn:
         stmt = mysql_insert(patents_table).values(rows)
         stmt = stmt.on_duplicate_key_update(
             patent_title=stmt.inserted.patent_title,
             patent_abstract=stmt.inserted.patent_abstract,
+            patent_claims=func.coalesce(
+                stmt.inserted.patent_claims,
+                patents_table.c.patent_claims,
+            ),
             patent_type=stmt.inserted.patent_type,
             patent_date=stmt.inserted.patent_date,
         )

@@ -87,3 +87,7 @@ classification.csv
 data/classification/CPCSchemeXML202608.zip
 data/classification/FullCPCDefinitionXML202608.zip
 classification.csv
+
+# Local backups / generated databases
+backups/
+*.sqlite3

@@ -29,6 +29,13 @@ For each concept, identify:
 1. A clear technical concept name.
 2. One PRIMARY SEARCH TERM.
 3. Exactly two ALTERNATIVE SEARCH TERMS.
+4. An importance classification selected from exactly one of:
+   - critical: central to the invention's proposed technical contribution;
+   - important: a meaningful mechanism or feature that strengthens or
+     distinguishes the approach but may not be essential to its core;
+   - supporting: supplementary context or implementation detail.
+5. A concise classification_reason grounded in the invention description.
+6. A confidence value of high, medium, or low.
 
 The PRIMARY SEARCH TERM is the most important requirement.
 
@@ -70,7 +77,10 @@ Distinguish between:
 - important technical mechanisms;
 - supporting implementation details.
 
-Do not assume every implementation detail is essential.
+Base classification on the supplied invention description.
+Do not assume that a feature is essential merely because it is
+mentioned first or repeated frequently.
+Do not make legal conclusions about patentability or claim scope.
 
 Do not introduce technical features that are not stated or
 reasonably supported by the invention description.
@@ -84,7 +94,6 @@ ideas that distinguish the invention.
 Later concepts may cover supporting mechanisms and
 implementation details.
 
-Do not generate classifications.
 Do not generate Boolean expressions.
 Do not generate proximity rules.
 Do not generate a complete search strategy.
@@ -110,7 +119,10 @@ Return exactly this JSON structure:
       "alternative_terms": [
         "alternative search term 1",
         "alternative search term 2"
-      ]
+      ],
+      "importance": "critical",
+      "classification_reason": "Why this concept has this importance",
+      "confidence": "medium"
     }}
   ]
 }}
@@ -139,6 +151,12 @@ Rules:
 - Do not include CPC, USPC, IPC, or other classifications.
 - Do not include Boolean operators.
 - Do not include explanations outside the JSON.
+- Classify every concept as critical, important, or supporting.
+- Include a concise classification_reason for every concept.
+- Set confidence to high, medium, or low.
+- Do not classify concepts solely by their order in the output.
+- Ensure the importance and reason are consistent with the invention.
+- Keep the existing rules requiring exactly ten concepts and exactly two alternatives per concept.
 """
 
 
@@ -203,11 +221,16 @@ def _normalize_search_terms(raw: Any) -> tuple[str, list[str]]:
 
 
 def _normalize_concepts(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Validate and normalize ten concepts and their classifications."""
     raw_concepts = payload.get("concepts")
 
     if not isinstance(raw_concepts, list):
-        raise ValueError("Claude response does not contain a valid concepts list.")
+        raise ValueError(
+            "Claude response does not contain a valid concepts list."
+        )
 
+    valid_importance = {"critical", "important", "supporting"}
+    valid_confidence = {"high", "medium", "low"}
     concepts: list[dict[str, Any]] = []
 
     for item in raw_concepts:
@@ -216,26 +239,41 @@ def _normalize_concepts(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
         primary_term, alternative_terms = _normalize_search_terms(item)
 
-        if not primary_term:
+        if not primary_term or len(alternative_terms) != 2:
             continue
 
-        if len(alternative_terms) != 2:
+        name = str(item.get("name") or "").strip()
+        if not name:
             continue
 
-        normalized = {
-            "name": str(item.get("name") or "").strip(),
-            "primary_term": primary_term,
-            "alternative_terms": alternative_terms,
-        }
+        importance = str(item.get("importance") or "").strip().lower()
+        if importance not in valid_importance:
+            importance = "important"
 
-        if not normalized["name"]:
-            continue
+        confidence = str(item.get("confidence") or "").strip().lower()
+        if confidence not in valid_confidence:
+            confidence = "low"
 
-        concepts.append(normalized)
+        reason = str(item.get("classification_reason") or "").strip()
+        if not reason:
+            reason = "Claude did not provide a classification rationale."
+            confidence = "low"
+
+        concepts.append(
+            {
+                "name": name,
+                "primary_term": primary_term,
+                "alternative_terms": alternative_terms,
+                "importance": importance,
+                "classification_reason": reason,
+                "confidence": confidence,
+            }
+        )
 
     if len(concepts) != 10:
         raise ValueError(
-            f"Claude returned {len(concepts)} valid concepts; exactly 10 are required."
+            f"Claude returned {len(concepts)} valid concepts; "
+            "exactly 10 are required."
         )
 
     return concepts
@@ -261,3 +299,210 @@ def generate_search_concepts(
 
     payload = _extract_json(raw)
     return _normalize_concepts(payload)
+
+
+QUERY_PLAN_SYSTEM_PROMPT = """
+You are a patent search strategist.
+
+Design a search plan for the supplied invention using only the
+approved concepts and their terms.
+
+Return valid JSON only. Do not use Markdown fences.
+
+Rules:
+- Produce 3 to 6 distinct search queries.
+- Each query must have a name, purpose, concept_indices, and groups.
+- concept_indices are 1-based indices into the supplied concepts list.
+- Each group must identify one concept_index and one or more terms
+  drawn from that concept's primary_term and alternative_terms.
+- Each group must use operator AND or OR.
+- Use OR to express terminology alternatives within a concept.
+- Use AND between groups when the combination is technically meaningful.
+- Include targeted queries for the most important inventive mechanisms.
+- Do not make every query depend on every concept.
+- Cover different aspects of the invention across the plan.
+- Do not invent concepts or terminology.
+- Do not return raw USPTO query syntax or field names. Python will
+  translate this plan into the search provider's supported syntax.
+- Do not make patentability or legal conclusions.
+
+Required structure:
+{
+  "queries": [
+    {
+      "name": "Short descriptive name",
+      "purpose": "What this query is intended to retrieve",
+      "concept_indices": [1, 2],
+      "groups": [
+        {
+          "concept_index": 1,
+          "terms": ["term one", "term alternative"],
+          "operator": "OR"
+        },
+        {
+          "concept_index": 2,
+          "terms": ["another term"],
+          "operator": "OR"
+        }
+      ]
+    }
+  ]
+}
+"""
+
+
+def normalize_query_plan(
+    payload: dict[str, Any],
+    concepts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Validate Claude's structured query plan without executing it."""
+    raw_queries = payload.get("queries")
+    if not isinstance(raw_queries, list):
+        raise ValueError("Query plan must contain a queries list.")
+
+    if not 3 <= len(raw_queries) <= 6:
+        raise ValueError("Query plan must contain between 3 and 6 queries.")
+
+    normalized_queries: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    allowed_operators = {"AND", "OR"}
+
+    for position, item in enumerate(raw_queries, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"Query {position} must be an object.")
+
+        name = _clean_text(item.get("name"))
+        purpose = _clean_text(item.get("purpose"))
+        groups_raw = item.get("groups")
+
+        if not name or not purpose:
+            raise ValueError(f"Query {position} needs a name and purpose.")
+
+        name_key = name.casefold()
+        if name_key in seen_names:
+            raise ValueError(f"Duplicate query name: {name}")
+        seen_names.add(name_key)
+
+        if not isinstance(groups_raw, list) or not groups_raw:
+            raise ValueError(f"Query {position} must contain groups.")
+
+        groups: list[dict[str, Any]] = []
+        used_indices: set[int] = set()
+
+        for group in groups_raw:
+            if not isinstance(group, dict):
+                raise ValueError(f"Query {position} contains an invalid group.")
+
+            try:
+                concept_index = int(group.get("concept_index"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Each group needs a valid concept_index.") from exc
+
+            if not 1 <= concept_index <= len(concepts):
+                raise ValueError(
+                    f"Concept index {concept_index} is outside the approved concepts."
+                )
+
+            if concept_index in used_indices:
+                raise ValueError(
+                    f"Query {position} repeats concept index {concept_index}."
+                )
+
+            operator = _clean_text(group.get("operator")).upper()
+            if operator not in allowed_operators:
+                raise ValueError("Group operator must be AND or OR.")
+
+            terms_raw = group.get("terms")
+            if not isinstance(terms_raw, list) or not terms_raw:
+                raise ValueError("Each group must contain at least one term.")
+
+            concept_entry = concepts[concept_index - 1]
+            approved_terms = {
+                _clean_text(concept_entry.get("primary_term")).casefold(),
+                *(
+                    _clean_text(term).casefold()
+                    for term in concept_entry.get("alternative_terms", [])
+                ),
+            }
+            approved_terms.discard("")
+
+            terms: list[str] = []
+            for raw_term in terms_raw:
+                term = _clean_text(raw_term)
+                if not term:
+                    continue
+                if term.casefold() not in approved_terms:
+                    raise ValueError(
+                        f"Query {position} uses an unapproved term "
+                        f"for concept {concept_index}: {term}"
+                    )
+                if term.casefold() not in {value.casefold() for value in terms}:
+                    terms.append(term)
+
+            if not terms:
+                raise ValueError("Each group must contain an approved non-empty term.")
+
+            used_indices.add(concept_index)
+            groups.append(
+                {
+                    "concept_index": concept_index,
+                    "terms": terms,
+                    "operator": operator,
+                }
+            )
+
+        declared_indices = item.get("concept_indices")
+        if not isinstance(declared_indices, list):
+            raise ValueError(f"Query {position} needs concept_indices.")
+
+        try:
+            declared = {int(value) for value in declared_indices}
+        except (TypeError, ValueError) as exc:
+            raise ValueError("concept_indices must contain integers.") from exc
+
+        if declared != used_indices:
+            raise ValueError(
+                f"Query {position}: concept_indices must match the groups."
+            )
+
+        normalized_queries.append(
+            {
+                "name": name,
+                "purpose": purpose,
+                "concept_indices": sorted(used_indices),
+                "groups": groups,
+            }
+        )
+
+    return {"queries": normalized_queries}
+
+
+def generate_query_plan(
+    invention: str,
+    concepts: list[dict[str, Any]],
+    client: ClaudeClient,
+) -> dict[str, Any]:
+    """Ask Claude for a validated query plan based on approved concepts."""
+    query = _clean_text(invention)
+    if not query:
+        raise ValueError("Invention description cannot be empty.")
+
+    if not isinstance(concepts, list) or not concepts:
+        raise ValueError("Approved concepts are required.")
+
+    prompt = (
+        "INVENTION DESCRIPTION:\n"
+        f"{query}\n\n"
+        "APPROVED CONCEPTS (indices are 1-based):\n"
+        f"{json.dumps(concepts, ensure_ascii=False, indent=2)}\n\n"
+        "Create the required structured query plan."
+    )
+
+    raw = client.complete(
+        system=QUERY_PLAN_SYSTEM_PROMPT,
+        user=prompt,
+        max_tokens=2400,
+    )
+
+    payload = _extract_json(raw)
+    return normalize_query_plan(payload, concepts)

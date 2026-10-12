@@ -21,6 +21,10 @@ rank-bm25>=0.2.2
 
 # LLM Clients
 anthropic>=0.25                 # Claude
+ollama>=0.3                     # local Ollama inference for the Mistral client
+
+# XML / EPO parsing
+lxml>=5.0                       # XML parsing for EPO OPS responses
 
 # Storage
 sqlalchemy>=2.0                 # MySQL / Postgres repository layer

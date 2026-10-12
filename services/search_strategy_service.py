@@ -574,3 +574,49 @@ def build_uspto_proximity_strings(
         results.append(expression)
 
     return results
+
+
+def build_odp_queries_from_plan(plan: dict) -> list[dict[str, str]]:
+    """Convert a validated Claude query plan into ODP Boolean queries."""
+
+    queries = plan.get("queries")
+    if not isinstance(queries, list) or not queries:
+        raise ValueError("A non-empty validated query plan is required.")
+
+    def quote_phrase(term: str) -> str:
+        value = str(term).strip()
+        if not value:
+            raise ValueError("Query terms cannot be empty.")
+
+        # Escape characters that could break a quoted phrase.
+        value = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{value}"'
+
+    output = []
+
+    for item in queries:
+        group_expressions = []
+
+        for group in item["groups"]:
+            terms = [quote_phrase(term) for term in group["terms"]]
+            if not terms:
+                raise ValueError("Each query group must contain terms.")
+
+            operator = group["operator"]
+            if operator not in {"AND", "OR"}:
+                raise ValueError("Unsupported Boolean operator.")
+
+            group_expressions.append(
+                "(" + f" {operator} ".join(terms) + ")"
+            )
+
+        expression = " AND ".join(group_expressions)
+        output.append(
+            {
+                "name": item["name"],
+                "purpose": item["purpose"],
+                "expression": expression,
+            }
+        )
+
+    return output

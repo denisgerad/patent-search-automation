@@ -319,6 +319,14 @@ Rules:
 - Use OR to express terminology alternatives within a concept.
 - Use AND between groups when the combination is technically meaningful.
 - Include targeted queries for the most important inventive mechanisms.
+- Every concept classified as critical must have its own independent
+  single-concept query.
+- A query combining multiple concepts does not satisfy this requirement.
+- Also include combination queries where the relationship between
+  mechanisms is technically meaningful.
+- Prefer coverage of distinct mechanisms over redundant queries.
+- The complete plan must satisfy all validation rules and contain
+  between 3 and 6 queries.
 - Do not make every query depend on every concept.
 - Cover different aspects of the invention across the plan.
 - Do not invent concepts or terminology.
@@ -474,7 +482,128 @@ def normalize_query_plan(
             }
         )
 
+    critical_indices = {
+        index
+        for index, concept in enumerate(concepts, start=1)
+        if _clean_text(concept.get("importance")).lower() == "critical"
+    }
+
+    covered_indices = {
+        index
+        for query in normalized_queries
+        for index in query["concept_indices"]
+    }
+
+    missing_critical = critical_indices - covered_indices
+    if missing_critical:
+        raise ValueError(
+            "Critical concepts missing from query plan: "
+            f"{sorted(missing_critical)}."
+        )
+
+    standalone_indices = {
+        query["concept_indices"][0]
+        for query in normalized_queries
+        if len(query["concept_indices"]) == 1
+    }
+
+    critical_without_standalone = critical_indices - standalone_indices
+    if critical_without_standalone:
+        raise ValueError(
+            "Critical concepts require an independent single-concept query: "
+            f"{sorted(critical_without_standalone)}."
+        )
+
     return {"queries": normalized_queries}
+
+
+def _repair_critical_standalone_queries(
+    payload: dict[str, Any],
+    concepts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Ensure critical concepts have standalone queries within the plan limit."""
+    queries = payload.get("queries")
+    if not isinstance(queries, list):
+        return payload
+
+    critical_indices = {
+        index
+        for index, concept in enumerate(concepts, start=1)
+        if _clean_text(concept.get("importance")).lower() == "critical"
+    }
+
+    standalone_indices = set()
+    for query in queries:
+        if not isinstance(query, dict):
+            continue
+        groups = query.get("groups")
+        if not isinstance(groups, list):
+            continue
+
+        indices = []
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            try:
+                indices.append(int(group.get("concept_index")))
+            except (TypeError, ValueError):
+                continue
+
+        if len(set(indices)) == 1 and len(indices) == 1:
+            standalone_indices.add(indices[0])
+
+    missing = sorted(critical_indices - standalone_indices)
+
+    if len(critical_indices) > 6:
+        raise ValueError(
+            "Cannot create independent queries for all critical concepts: "
+            "the plan limit is six queries, but there are more than six "
+            "critical concepts."
+        )
+
+    for index in missing:
+        concept = concepts[index - 1]
+        primary_term = _clean_text(concept.get("primary_term"))
+
+        if not primary_term:
+            raise ValueError(
+                f"Critical concept {index} has no approved primary_term."
+            )
+
+        queries.append({
+            "name": f"Critical concept {index} - standalone",
+            "purpose": (
+                f"Search for the critical mechanism: {primary_term}."
+            ),
+            "concept_indices": [index],
+            "groups": [{
+                "concept_index": index,
+                "terms": [primary_term],
+                "operator": "OR",
+            }],
+        })
+
+    while len(queries) > 6:
+        combination_position = next(
+            (
+                position
+                for position in range(len(queries) - 1, -1, -1)
+                if isinstance(queries[position], dict)
+                and isinstance(queries[position].get("groups"), list)
+                and len(queries[position]["groups"]) > 1
+            ),
+            None,
+        )
+
+        if combination_position is None:
+            raise ValueError(
+                "Cannot repair query plan within the six-query limit "
+                "without removing standalone searches."
+            )
+
+        queries.pop(combination_position)
+
+    return payload
 
 
 def generate_query_plan(
@@ -482,7 +611,7 @@ def generate_query_plan(
     concepts: list[dict[str, Any]],
     client: ClaudeClient,
 ) -> dict[str, Any]:
-    """Ask Claude for a validated query plan based on approved concepts."""
+    """Generate a query plan, retrying once when validation fails."""
     query = _clean_text(invention)
     if not query:
         raise ValueError("Invention description cannot be empty.")
@@ -498,11 +627,34 @@ def generate_query_plan(
         "Create the required structured query plan."
     )
 
-    raw = client.complete(
-        system=QUERY_PLAN_SYSTEM_PROMPT,
-        user=prompt,
-        max_tokens=2400,
-    )
+    last_error = None
 
-    payload = _extract_json(raw)
-    return normalize_query_plan(payload, concepts)
+    for attempt in range(2):
+        if attempt == 1:
+            prompt += (
+                "\n\nCORRECTION REQUIRED:\n"
+                f"The previous plan failed validation: {last_error}\n"
+                "Return a corrected complete JSON query plan. "
+                "Preserve all approved concepts. Every critical concept "
+                "must have its own single-concept query. Keep useful "
+                "combination queries where the query limit permits. "
+                "Follow every original validation rule."
+            )
+
+        raw = client.complete(
+            system=QUERY_PLAN_SYSTEM_PROMPT,
+            user=prompt,
+            max_tokens=2400,
+        )
+
+        try:
+            payload = _extract_json(raw)
+            payload = _repair_critical_standalone_queries(payload, concepts)
+            return normalize_query_plan(payload, concepts)
+        except ValueError as exc:
+            last_error = str(exc)
+
+    raise ValueError(
+        "Claude could not produce a valid query plan after one correction. "
+        f"Last validation error: {last_error}"
+    )

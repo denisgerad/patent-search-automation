@@ -67,9 +67,31 @@ def run_search_feedback_loop(
             stop_reason = "accepted"
             break
 
-        if decision == "insufficient_evidence":
+        if decision == "insufficient_evidence" and results:
             stop_reason = "insufficient_evidence"
             break
+
+        if decision == "insufficient_evidence" and not results:
+            if run_number == max_runs:
+                stop_reason = "insufficient_evidence"
+                break
+
+            # An empty search result is a retrieval problem to investigate.
+            # Give the revision planner a chance to broaden or redirect the search.
+            next_plan = revise_plan(current_plan, review)
+
+            if not isinstance(next_plan, dict) or not next_plan:
+                stop_reason = "revision_failed"
+                final_decision = "insufficient_evidence"
+                break
+
+            if next_plan == current_plan:
+                stop_reason = "revision_unchanged"
+                final_decision = "insufficient_evidence"
+                break
+
+            current_plan = next_plan
+            continue
 
         # A revision is only allowed if another run remains.
         if run_number == max_runs:

@@ -57,6 +57,13 @@ def valid_review():
                 "matched_mechanisms": ["Dependency tracking"],
                 "missing_mechanisms": ["Contractor eligibility gating"],
                 "evidence": "The supplied abstract describes dependent evaluation states.",
+                "evidence_excerpts": [
+                    {
+                        "source": "abstract",
+                        "excerpt": "An evaluation system tracks dependent states.",
+                        "supports": "Dependency tracking",
+                    }
+                ],
             },
             {
                 "patent_id": "US7654321A1",
@@ -64,6 +71,13 @@ def valid_review():
                 "matched_mechanisms": ["Incremental score calculation"],
                 "missing_mechanisms": ["Contractor matching"],
                 "evidence": "The supplied abstract describes score recalculation after changes.",
+                "evidence_excerpts": [
+                    {
+                        "source": "abstract",
+                        "excerpt": "Scores are recalculated after input changes.",
+                        "supports": "Incremental score calculation",
+                    }
+                ],
             },
         ],
     }
@@ -135,6 +149,45 @@ def test_review_search_results_uses_client(patents, queries, valid_review):
     )
 
     assert result["decision"] == "revise"
+
+
+def test_review_retries_when_excerpt_support_label_is_invalid(
+    patents, queries, valid_review
+):
+    import copy
+
+    invalid_review = copy.deepcopy(valid_review)
+    invalid_review["patent_reviews"][0]["evidence_excerpts"][0][
+        "supports"
+    ] = "A mechanism not listed as matched"
+
+    class FakeClaudeClient:
+        calls = 0
+
+        def complete(self, system, user, max_tokens=None):
+            self.calls += 1
+
+            if self.calls == 1:
+                return json.dumps(invalid_review)
+
+            assert "CORRECTION REQUIRED" in user
+            assert "must exactly match" in user
+            return json.dumps(valid_review)
+
+    client = FakeClaudeClient()
+
+    result = review_search_results(
+        invention="Contractor matching with incremental scoring.",
+        concepts=[{"primary_term": "contractor matching"}],
+        queries=queries,
+        patents=patents,
+        client=client,
+    )
+
+    assert client.calls == 2
+    assert result["patent_reviews"][0]["evidence_excerpts"][0]["supports"] == (
+        result["patent_reviews"][0]["matched_mechanisms"][0]
+    )
 
 
 def test_select_top_patents_limits_results(patents):

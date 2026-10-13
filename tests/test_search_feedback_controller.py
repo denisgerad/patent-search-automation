@@ -75,6 +75,47 @@ def test_insufficient_evidence_stops_without_revision():
     assert revised == []
 
 
+def test_empty_results_trigger_revision_and_second_search():
+    plans = []
+    revisions = []
+
+    def execute(plan):
+        plans.append(plan)
+        if len(plans) == 1:
+            return []
+        return [{"patent_id": "P1"}]
+
+    def review(plan, patents):
+        if not patents:
+            return {
+                "decision": "insufficient_evidence",
+                "rationale": "The first query plan returned no records.",
+                "coverage_gaps": [],
+                "queries_to_revise": [],
+            }
+        return make_review("accept")
+
+    def revise(plan, feedback):
+        revisions.append(feedback)
+        return {"version": 2}
+
+    result = run_search_feedback_loop(
+        initial_plan={"version": 1},
+        execute_search=execute,
+        review_results=review,
+        revise_plan=revise,
+        max_runs=3,
+    )
+
+    assert result["decision"] == "accept"
+    assert result["run_count"] == 2
+    assert result["stop_reason"] == "accepted"
+    assert [plan["version"] for plan in plans] == [1, 2]
+    assert len(revisions) == 1
+    assert result["history"][0]["results"] == []
+    assert result["history"][1]["results"] == [{"patent_id": "P1"}]
+
+
 def test_revision_failure_stops_safely():
     result = run_search_feedback_loop(
         initial_plan={"version": 1},

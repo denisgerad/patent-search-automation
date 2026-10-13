@@ -292,10 +292,26 @@ if _ai_concepts:
 
             edited_alternative_terms.append(edited_alternative)
 
+        st.caption(
+            "Claude's recommendation: "
+            f"{concept.get('classification_reason', 'No reason provided.')}"
+        )
+
+        confidence = str(concept.get("confidence", "low")).lower()
+        st.caption(f"Classification confidence: {confidence.title()}")
+
+        importance_options = ["critical", "important", "supporting"]
+        recommended_importance = str(
+            concept.get("importance", "important")
+        ).lower()
+
+        if recommended_importance not in importance_options:
+            recommended_importance = "important"
+
         importance = st.selectbox(
-            "Importance",
-            ["critical", "important", "supporting"],
-            index=1,
+            "Importance — review or override Claude",
+            importance_options,
+            index=importance_options.index(recommended_importance),
             key=f"ai_concept_{index}_importance",
         )
 
@@ -305,6 +321,11 @@ if _ai_concepts:
                 "primary_term": edited_primary_term,
                 "alternative_terms": edited_alternative_terms,
                 "importance": importance,
+                "classification_reason": concept.get(
+                    "classification_reason",
+                    "No reason provided.",
+                ),
+                "confidence": concept.get("confidence", "low"),
             }
         )
 
@@ -361,8 +382,225 @@ if _ai_concepts:
     if st.session_state.get("ai_search_concepts_approved", False):
         st.info(
             "The reviewed concepts are approved. "
-            "No patent search has been executed yet."
+            "You can now run the AI patent search and review."
         )
+
+        if st.button(
+            "🔎 Run AI Patent Search & Review",
+            key="run_ai_patent_feedback_workflow",
+            type="primary",
+        ):
+            invention = str(
+                st.session_state.get("ai_invention_description", "")
+            ).strip()
+            approved_concepts = st.session_state.get(
+                "ai_search_concepts", []
+            )
+
+            st.session_state.pop("ai_feedback_workflow_result", None)
+            st.session_state.pop("ai_feedback_workflow_error", None)
+
+            if not invention:
+                st.session_state.ai_feedback_workflow_error = (
+                    "Please enter an invention description."
+                )
+            elif not approved_concepts:
+                st.session_state.ai_feedback_workflow_error = (
+                    "No approved search concepts were found."
+                )
+            else:
+                try:
+                    from models.claude_client import ClaudeClient
+                    from services.search_feedback_workflow import (
+                        run_patent_search_feedback_workflow,
+                    )
+
+                    with st.spinner(
+                        "Generating search queries, retrieving patents, "
+                        "ranking evidence, and reviewing results..."
+                    ):
+                        result = run_patent_search_feedback_workflow(
+                            invention=invention,
+                            approved_concepts=approved_concepts,
+                            client=ClaudeClient(),
+                            max_runs=3,
+                        )
+
+                    st.session_state.ai_feedback_workflow_result = result
+
+                except Exception as exc:
+                    st.session_state.ai_feedback_workflow_error = str(exc)
+
+    if st.session_state.get("ai_feedback_workflow_error"):
+        st.error(
+            "The AI patent search workflow failed: "
+            + st.session_state.ai_feedback_workflow_error
+        )
+
+    if st.session_state.get("ai_feedback_workflow_result") is not None:
+        result = st.session_state.ai_feedback_workflow_result
+
+        st.markdown("### 📊 AI Patent Search & Review Results")
+
+        if "ai_feedback_expand_all" not in st.session_state:
+            st.session_state.ai_feedback_expand_all = False
+
+        control_col, status_col = st.columns([1, 3])
+
+        with control_col:
+            if st.button(
+                (
+                    "⬆️ Collapse all"
+                    if st.session_state.ai_feedback_expand_all
+                    else "⬇️ Expand all"
+                ),
+                key="ai_feedback_toggle_all",
+            ):
+                st.session_state.ai_feedback_expand_all = (
+                    not st.session_state.ai_feedback_expand_all
+                )
+                st.rerun()
+
+        with status_col:
+            st.caption(
+                f"Runs: {result.get('run_count', 0)} / "
+                f"{result.get('max_runs', 3)} · "
+                f"Decision: {result.get('decision', 'unknown')} · "
+                f"Stop reason: {result.get('stop_reason', 'unknown')}"
+            )
+
+        expanded = st.session_state.ai_feedback_expand_all
+        history = result.get("history", [])
+
+        for run in history:
+            run_number = run.get("run_number", "?")
+            plan = run.get("plan", {})
+            queries = plan.get("queries", [])
+            patents = run.get("results", [])
+            review = run.get("review", {})
+
+            with st.expander(
+                f"Run {run_number} — "
+                f"{len(queries)} queries · "
+                f"{len(patents)} retrieved records · "
+                f"{review.get('decision', 'not reviewed')}",
+                expanded=expanded,
+            ):
+                st.markdown("#### Search plan")
+
+                for query in queries:
+                    with st.expander(
+                        query.get("name", "Unnamed query"),
+                        expanded=expanded,
+                    ):
+                        st.write(query.get("purpose", ""))
+                        st.json(query.get("groups", []), expanded=expanded)
+
+                st.markdown("#### Patent records")
+                if not patents:
+                    st.info(
+                        "No patent records were retrieved in this run. "
+                        "This does not establish that relevant prior art is absent."
+                    )
+                else:
+                    for patent in patents:
+                        patent_id = patent.get("patent_id", "Unknown ID")
+                        title = patent.get("title", "Untitled patent")
+
+                        with st.expander(
+                            f"{patent_id} — {title}",
+                            expanded=expanded,
+                        ):
+                            st.write("**Abstract**")
+                            st.write(patent.get("abstract") or "Not available")
+
+                            st.write("**Claims**")
+                            st.write(patent.get("claims") or "Not available")
+
+                            if patent.get("search_queries"):
+                                st.caption(
+                                    "Found by: "
+                                    + ", ".join(patent["search_queries"])
+                                )
+
+                            for score in (
+                                "cosine_score",
+                                "bm25_score",
+                                "hybrid_score",
+                            ):
+                                if patent.get(score) is not None:
+                                    st.caption(
+                                        f"{score}: {patent[score]}"
+                                    )
+
+                st.markdown("#### Review and coverage")
+
+                st.write(
+                    review.get(
+                        "rationale",
+                        "No review rationale was recorded.",
+                    )
+                )
+
+                gaps = review.get("coverage_gaps", [])
+                if gaps:
+                    st.write("**Coverage gaps**")
+                    for gap in gaps:
+                        st.markdown(f"- {gap}")
+
+                revisions = review.get("queries_to_revise", [])
+                if revisions:
+                    st.write("**Recommended query revisions**")
+                    st.json(revisions, expanded=expanded)
+
+                patent_reviews = review.get("patent_reviews", [])
+                if patent_reviews:
+                    st.markdown("**Evidence review by patent**")
+
+                    for patent_review in patent_reviews:
+                        with st.expander(
+                            (
+                                f"{patent_review.get('patent_id', 'Unknown ID')} "
+                                f"— {patent_review.get('label', 'unlabelled')}"
+                            ),
+                            expanded=expanded,
+                        ):
+                            st.write(patent_review.get("evidence", ""))
+
+                            evidence_excerpts = patent_review.get(
+                                "evidence_excerpts", []
+                            )
+                            if evidence_excerpts:
+                                st.markdown("**Source evidence excerpts**")
+                                for excerpt in evidence_excerpts:
+                                    st.caption(
+                                        f"Source: {excerpt.get('source', 'unknown')}"
+                                    )
+                                    st.markdown(
+                                        f"> {excerpt.get('excerpt', '')}"
+                                    )
+                                    st.caption(
+                                        "Mechanism supported: "
+                                        f"{excerpt.get('supports', '')}"
+                                    )
+                            else:
+                                st.warning(
+                                    "No verified source excerpts are available "
+                                    "for this patent review."
+                                )
+
+                            st.write("**Matched mechanisms**")
+                            st.write(
+                                patent_review.get("matched_mechanisms", [])
+                            )
+
+                            st.write("**Missing mechanisms**")
+                            st.write(
+                                patent_review.get("missing_mechanisms", [])
+                            )
+
+        with st.expander("Raw workflow JSON", expanded=False):
+            st.json(result, expanded=False)
 
 st.markdown("### 🧩 AI Invention Structure")
 

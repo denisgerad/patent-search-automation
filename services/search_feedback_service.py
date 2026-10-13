@@ -36,10 +36,62 @@ Return this structure:
       "label": "relevant | partially_relevant | not_relevant | insufficient_evidence",
       "matched_mechanisms": ["Mechanisms supported by the supplied evidence"],
       "missing_mechanisms": ["Important mechanisms not shown in the evidence"],
-      "evidence": "Brief explanation grounded in supplied title, abstract or claims"
+      "evidence": "Brief explanation grounded in supplied title, abstract or claims",
+      "evidence_excerpts": [
+        {
+          "source": "title | abstract | claims",
+          "excerpt": "Exact text copied from the supplied patent field",
+          "supports": "The matched mechanism this excerpt supports"
+        }
+      ]
     }
   ]
 }
+
+Evidence assessment requirements:
+- Assess each patent against the invention's approved concepts and
+  the complete invention description.
+- Distinguish a shared generic term from a shared technical mechanism.
+- Identify which approved concepts are supported by the patent's
+  title, abstract, or claims.
+- Identify which important concepts are not established by the
+  available patent evidence.
+- Treat dependency graphs in software testing, data processing,
+  and other domains as adjacent evidence unless the disclosed
+  mechanism materially relates to the invention being searched.
+- Do not infer incremental score recalculation merely because a
+  patent describes dependency tracking.
+- Do not infer weighted criterion scoring, eligibility gating,
+  or contractor/vendor evaluation unless the supplied evidence
+  supports those mechanisms.
+- A patent can be partially relevant even when it does not
+  disclose the complete invention.
+- Provide evidence_excerpts for each patent review.
+- Each excerpt must be copied verbatim from the supplied title, abstract,
+  or claims. Do not paraphrase inside an excerpt.
+- The source must identify the field from which the excerpt was copied:
+  title, abstract, or claims.
+- The supports value must identify one of the review's matched_mechanisms.
+- Every matched mechanism must have at least one corresponding excerpt.
+- If the supplied text does not establish a mechanism, do not mark it
+  as matched merely because related terminology appears.
+- If no adequate excerpt exists, use insufficient_evidence when the
+  available text is too limited for a meaningful assessment.
+- An empty or unavailable source field must never be treated as evidence.
+- When the abstract or claims are empty or inadequate, use
+  insufficient_evidence rather than guessing.
+
+Coverage assessment:
+- Assess coverage across the approved concepts, not only the
+  number of retrieved patents.
+- Distinguish gaps in individual technical features from gaps
+  in combinations of features.
+- Recommend revision when the evidence reveals a specific,
+  actionable search gap.
+- Do not recommend revision solely because fewer than 20
+  patents were retrieved.
+- Do not interpret embedding or hybrid ranking scores as
+  probabilities of relevance.
 
 Decision rules:
 - accept means the results appear adequate for the stated search objective,
@@ -98,6 +150,11 @@ def normalize_search_review(
         for patent in patents
         if _clean_text(patent.get("patent_id"))
     }
+    patents_by_id = {
+        _clean_text(patent.get("patent_id")): patent
+        for patent in patents
+        if _clean_text(patent.get("patent_id"))
+    }
     reviewed_ids: set[str] = set()
     normalized_reviews = []
 
@@ -119,17 +176,82 @@ def normalize_search_review(
         if not evidence:
             raise ValueError(f"Evidence is required for patent {patent_id}.")
 
+        matched = clean_string_list(
+            review.get("matched_mechanisms", []), "matched_mechanisms"
+        )
+        missing = clean_string_list(
+            review.get("missing_mechanisms", []), "missing_mechanisms"
+        )
+
+        raw_excerpts = review.get("evidence_excerpts")
+        if not isinstance(raw_excerpts, list):
+            raise ValueError(
+                f"evidence_excerpts must be a list for patent {patent_id}."
+            )
+
+        patent = patents_by_id[patent_id]
+        source_fields = {
+            "title": _clean_text(patent.get("title")),
+            "abstract": _clean_text(patent.get("abstract")),
+            "claims": _clean_text(patent.get("claims")),
+        }
+
+        excerpts = []
+        supported_mechanisms = set()
+
+        for excerpt_item in raw_excerpts:
+            if not isinstance(excerpt_item, dict):
+                raise ValueError("Each evidence excerpt must be an object.")
+
+            source = _clean_text(excerpt_item.get("source")).lower()
+            excerpt = _clean_text(excerpt_item.get("excerpt"))
+            supports = _clean_text(excerpt_item.get("supports"))
+
+            if source not in source_fields:
+                raise ValueError(
+                    f"Invalid evidence source for patent {patent_id}: {source}"
+                )
+
+            if not excerpt or excerpt.casefold() not in source_fields[source].casefold():
+                raise ValueError(
+                    f"Evidence excerpt does not match supplied {source} text "
+                    f"for patent {patent_id}."
+                )
+
+            if supports not in matched:
+                raise ValueError(
+                    f"Evidence excerpt for {patent_id} must support a "
+                    "listed matched mechanism."
+                )
+
+            excerpts.append({
+                "source": source,
+                "excerpt": excerpt,
+                "supports": supports,
+            })
+            supported_mechanisms.add(supports)
+
+        if label != "insufficient_evidence" and not excerpts:
+            raise ValueError(
+                f"At least one verified evidence excerpt is required "
+                f"for patent {patent_id}."
+            )
+
+        unsupported_matches = set(matched) - supported_mechanisms
+        if unsupported_matches:
+            raise ValueError(
+                f"Matched mechanisms lack verified excerpts for {patent_id}: "
+                f"{sorted(unsupported_matches)}"
+            )
+
         normalized_reviews.append(
             {
                 "patent_id": patent_id,
                 "label": label,
-                "matched_mechanisms": clean_string_list(
-                    review.get("matched_mechanisms", []), "matched_mechanisms"
-                ),
-                "missing_mechanisms": clean_string_list(
-                    review.get("missing_mechanisms", []), "missing_mechanisms"
-                ),
+                "matched_mechanisms": matched,
+                "missing_mechanisms": missing,
                 "evidence": evidence,
+                "evidence_excerpts": excerpts,
             }
         )
         reviewed_ids.add(patent_id)
@@ -211,13 +333,45 @@ def review_search_results(
         "Review all supplied patents and return the required JSON."
     )
 
-    raw = client.complete(
-        system=REVIEW_SYSTEM_PROMPT,
-        user=prompt,
-        max_tokens=5000,
+    last_error = None
+    previous_raw = None
+
+    for attempt in range(2):
+        correction_prompt = prompt
+
+        if attempt == 1:
+            correction_prompt += (
+                "\n\nCORRECTION REQUIRED:\n"
+                "Your previous response failed validation.\n"
+                f"Validation error: {last_error}\n\n"
+                "Return the complete corrected JSON object only. "
+                "Do not include Markdown fences or explanatory text. "
+                "Use only the supplied patent evidence. Every evidence "
+                "excerpt must be verbatim from its source field, and its "
+                "'supports' value must exactly match a string in that "
+                "patent's 'matched_mechanisms' list. Remove unsupported "
+                "matches and their excerpts. If the evidence is inadequate, "
+                "use 'insufficient_evidence' where appropriate. "
+                "Do not invent evidence or unsupported matches."
+            )
+
+        raw = client.complete(
+            system=REVIEW_SYSTEM_PROMPT,
+            user=correction_prompt,
+            max_tokens=5000,
+        )
+
+        try:
+            payload = _extract_json(raw)
+            return normalize_search_review(payload, patents, query_names)
+        except ValueError as exc:
+            last_error = str(exc)
+            previous_raw = raw
+
+    raise ValueError(
+        "Claude could not produce a valid evidence review after one correction. "
+        f"Last validation error: {last_error}"
     )
-    payload = _extract_json(raw)
-    return normalize_search_review(payload, patents, query_names)
 
 
 def select_top_patents(

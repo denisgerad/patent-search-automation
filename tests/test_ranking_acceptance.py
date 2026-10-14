@@ -261,3 +261,58 @@ def test_contractor_matching_acceptance_cases_rank_by_concept_coverage():
 
     assert scores["high"] > scores["partial"]
     assert scores["partial"] > scores["low"]
+
+
+def test_concept_coverage_reports_full_partial_and_zero_matches():
+    from models.schemas import SearchConcept, SearchStrategy
+
+    strategy = SearchStrategy(
+        original_input="Contractor matching with incremental recalculation",
+        concepts=[
+            SearchConcept(
+                name="Contractor matching",
+                importance="critical",
+                terms=["contractor matching", "contractor ranking"],
+            ),
+            SearchConcept(
+                name="Dependency recalculation",
+                importance="critical",
+                terms=["dependency graph", "incremental recalculation"],
+            ),
+        ],
+    )
+
+    full = PatentRecord(
+        patent_id="FULL",
+        patent_title="CONTRACTOR MATCHING",
+        patent_abstract="Incremental_recalculation using a dependency graph.",
+    )
+    partial = PatentRecord(
+        patent_id="PARTIAL",
+        patent_title="Dependency graph processing",
+        patent_abstract="Updates affected states.",
+    )
+    none = PatentRecord(
+        patent_id="NONE",
+        patent_title="Weather monitoring",
+        patent_abstract="Collects temperature measurements.",
+    )
+
+    full_result = ranking_service._calculate_concept_coverage(full, strategy)
+    partial_result = ranking_service._calculate_concept_coverage(
+        partial, strategy
+    )
+    none_result = ranking_service._calculate_concept_coverage(none, strategy)
+
+    assert full_result["coverage"] == 1.0
+    assert full_result["matched_concepts"] == 2
+    assert full_result["total_concepts"] == 2
+
+    assert partial_result["coverage"] == 0.5
+    assert partial_result["concept_hits"] == {
+        "Contractor matching": False,
+        "Dependency recalculation": True,
+    }
+
+    assert none_result["coverage"] == 0.0
+    assert none_result["matched_concepts"] == 0

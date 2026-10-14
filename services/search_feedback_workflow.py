@@ -229,6 +229,9 @@ def _revise_plan(
         "Return the required query-plan JSON."
     )
 
+    if hasattr(client, "set_usage_stage"):
+        client.set_usage_stage("Search plan revision")
+
     raw = client.complete(
         system=REVISION_SYSTEM_PROMPT,
         user=prompt,
@@ -257,6 +260,10 @@ def run_patent_search_feedback_workflow(
         raise ValueError("max_runs must be between 1 and 3.")
 
     active_client = client or ClaudeClient()
+
+    if hasattr(active_client, "reset_usage"):
+        active_client.reset_usage()
+
     initial_plan = generate_query_plan(
         invention,
         approved_concepts,
@@ -310,7 +317,7 @@ def run_patent_search_feedback_workflow(
             }
 
         try:
-            return review_search_results(
+            review_result = review_search_results(
                 invention=invention,
                 concepts=approved_concepts,
                 queries=queries,
@@ -318,8 +325,8 @@ def run_patent_search_feedback_workflow(
                 client=active_client,
             )
         except ValueError as exc:
-            # Never convert an invalid AI review into a positive match.
-            return {
+            # Preserve the ranked candidates even when review validation fails.
+            review_result = {
                 "decision": "insufficient_evidence",
                 "rationale": (
                     "Patent candidates were retrieved and ranked, but the "
@@ -338,6 +345,10 @@ def run_patent_search_feedback_workflow(
                 "patent_reviews": [],
             }
 
+        # Retain ranking output independently of the Claude review decision.
+        review_result["ranked_candidates"] = top_patents
+        return review_result
+
     def revise(
         plan: dict[str, Any],
         feedback: dict[str, Any],
@@ -350,10 +361,15 @@ def run_patent_search_feedback_workflow(
             client=active_client,
         )
 
-    return run_search_feedback_loop(
+    result = run_search_feedback_loop(
         initial_plan=initial_plan,
         execute_search=execute,
         review_results=review,
         revise_plan=revise,
         max_runs=max_runs,
     )
+
+    if hasattr(active_client, "get_usage_summary"):
+        result["token_usage"] = active_client.get_usage_summary()
+
+    return result

@@ -61,11 +61,16 @@ from services.classification_refinement_service import (
 )
 from services.search_strategy_service import (
     build_boolean_search,
+    build_core_pair_queries,
     build_search_queries,
     build_uspto_search_strings,
     build_uspto_proximity_strings,
 )
 from services.search_terminology import add_terminology_variants
+from services.retrieval_diagnostics_service import (
+    calculate_retrieval_concept_coverage,
+    calculate_pairwise_query_overlap,
+)
 
 # ── page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -110,8 +115,11 @@ for k, v in _DEFAULTS.items():
 
 
 def _reset():
+    _preserved_keys = {"strategy_retrieval_mode"}
+
     for k, v in _DEFAULTS.items():
-        st.session_state[k] = v
+        if k not in _preserved_keys:
+            st.session_state[k] = v
 
 
 # ── sidebar ─────────────────────────────────────────────────────────────────────
@@ -389,6 +397,7 @@ if _ai_concepts:
             "🔎 Run AI Patent Search & Review",
             key="run_ai_patent_feedback_workflow",
             type="primary",
+            disabled=True,
         ):
             invention = str(
                 st.session_state.get("ai_invention_description", "")
@@ -439,6 +448,51 @@ if _ai_concepts:
 
     if st.session_state.get("ai_feedback_workflow_result") is not None:
         result = st.session_state.ai_feedback_workflow_result
+
+        usage = result.get("token_usage", {})
+
+        if usage:
+            st.markdown("#### Claude token usage")
+
+            metric_cols = st.columns(3)
+            metric_cols[0].metric(
+                "Input tokens", f"{usage.get('input_tokens', 0):,}"
+            )
+            metric_cols[1].metric(
+                "Output tokens", f"{usage.get('output_tokens', 0):,}"
+            )
+            metric_cols[2].metric(
+                "Total tokens", f"{usage.get('total_tokens', 0):,}"
+            )
+
+            st.caption(
+                f"Claude API calls: {usage.get('calls', 0)} · "
+                "Includes successful calls and validation retries."
+            )
+
+            with st.expander("Token usage by stage"):
+                stage_rows = [
+                    {"Stage": stage, **values}
+                    for stage, values in usage.get("by_stage", {}).items()
+                ]
+                if stage_rows:
+                    st.dataframe(stage_rows, hide_index=True, use_container_width=True)
+
+            with st.expander("Individual Claude API calls"):
+                call_rows = [
+                    {
+                        "Stage": event["stage"],
+                        "Model": event["model"],
+                        "Input": event["input_tokens"],
+                        "Output": event["output_tokens"],
+                        "Total": event["total_tokens"],
+                    }
+                    for event in usage.get("events", [])
+                ]
+                if call_rows:
+                    st.dataframe(
+                        call_rows, hide_index=True, use_container_width=True
+                    )
 
         st.markdown("### 📊 AI Patent Search & Review Results")
 
@@ -496,7 +550,56 @@ if _ai_concepts:
                         st.write(query.get("purpose", ""))
                         st.json(query.get("groups", []), expanded=expanded)
 
-                st.markdown("#### Patent records")
+                st.markdown("#### 🏆 Top 8 ranked candidates")
+
+                ranked_candidates = review.get("ranked_candidates", [])
+
+                if not ranked_candidates:
+                    st.info("No ranked candidates were retained for this run.")
+                else:
+                    st.caption(
+                        f"{len(ranked_candidates)} candidates selected by the ranker. "
+                        "Scores indicate ranking relevance, not verified patent overlap."
+                    )
+
+                    for rank_position, patent in enumerate(ranked_candidates, start=1):
+                        patent_id = patent.get("patent_id", "Unknown ID")
+                        title = patent.get("title", "Untitled patent")
+
+                        with st.expander(
+                            f"#{rank_position} — {patent_id} — {title}",
+                            expanded=expanded,
+                        ):
+                            score_cols = st.columns(4)
+                            score_cols[0].metric(
+                                "Hybrid",
+                                f"{patent.get('hybrid_score', 0):.4f}",
+                            )
+                            score_cols[1].metric(
+                                "Cosine",
+                                f"{patent.get('cosine_score', 0):.4f}",
+                            )
+                            score_cols[2].metric(
+                                "BM25",
+                                f"{patent.get('bm25_score', 0):.4f}",
+                            )
+                            score_cols[3].metric(
+                                "Coverage",
+                                f"{patent.get('coverage', 0):.2f}",
+                            )
+
+                            st.write("**Abstract**")
+                            st.write(patent.get("abstract") or "Not available")
+
+                            st.write("**Claims**")
+                            st.write(patent.get("claims") or "Not available")
+
+                            if patent.get("search_queries"):
+                                st.caption(
+                                    "Found by: " + ", ".join(patent["search_queries"])
+                                )
+
+                st.markdown("#### All retrieved patent records")
                 if not patents:
                     st.info(
                         "No patent records were retrieved in this run. "
@@ -1019,6 +1122,25 @@ with st.expander("Build Search Strategy", expanded=True):
                 )
             )
 
+    st.markdown("### Retrieval Strategy")
+
+    _retrieval_mode = st.radio(
+        "How should critical concepts be searched?",
+        options=["Broad", "Balanced", "Strict"],
+        index=0,
+        format_func=lambda mode: {
+            "Broad": "Broad — search each critical concept independently",
+            "Balanced": "Balanced — individual searches + concept pairs",
+            "Strict": "Strict — require all critical concepts",
+        }[mode],
+        help=(
+            "Broad maximizes discovery. Balanced also searches pairs of "
+            "critical concepts. Strict requires all critical concepts "
+            "in one Boolean query."
+        ),
+        key="strategy_retrieval_mode",
+    )
+
     st.markdown("### Relationship Between Concepts")
 
     _concept_operator = st.selectbox(
@@ -1143,6 +1265,57 @@ with st.expander("Build Search Strategy", expanded=True):
             if _boolean_search:
                 st.markdown("### Generated Boolean Search")
                 st.code(_boolean_search, language="text")
+
+            from services.search_strategy_service import (
+                build_search_queries,
+                build_core_pair_queries,
+            )
+
+            _critical_count = sum(
+                1
+                for concept in _strategy.concepts
+                if concept.importance.lower() == "critical"
+                and any(term.strip() for term in concept.terms)
+            )
+
+            _individual_queries = build_search_queries(_strategy)
+            _pair_queries = build_core_pair_queries(_strategy)
+
+            if _critical_count >= 2:
+                _strict_query = build_boolean_search(_strategy)
+            else:
+                _strict_query = ""
+
+            if _retrieval_mode == "Broad":
+                _preview_queries = _individual_queries
+            elif _retrieval_mode == "Balanced":
+                _preview_queries = _individual_queries + _pair_queries
+            else:
+                _preview_queries = (
+                    [_strict_query] if _strict_query else []
+                )
+
+            # Remove duplicate expressions while preserving query order.
+            _preview_queries = list(dict.fromkeys(_preview_queries))
+
+            st.markdown("### Retrieval Query Preview")
+            st.caption(
+                "Preview only: these queries have not yet been executed."
+            )
+
+            st.metric("Queries planned", len(_preview_queries))
+
+            if not _preview_queries:
+                st.warning(
+                    "No queries can be generated. Add at least one "
+                    "critical concept with a non-empty search term."
+                )
+            else:
+                for _query_index, _query_text in enumerate(
+                    _preview_queries, start=1
+                ):
+                    st.markdown(f"**Query {_query_index}**")
+                    st.code(_query_text, language="text")
 
             _uspto_strings = build_uspto_search_strings(_strategy)
 
@@ -1658,21 +1831,44 @@ def _run_search(queries: list[str]) -> tuple[list, list]:
         and backend == "uspto"
         and settings.patentsview_api_key
     ):
-        from services.search_strategy_service import build_search_queries
+        from services.search_strategy_service import build_queries_for_mode
         from services.uspto_search_service import search_patents_by_strategy
 
         strategy = st.session_state.search_strategy
-        strategy_queries = build_search_queries(strategy)
+        retrieval_mode = st.session_state.get(
+            "strategy_retrieval_mode",
+            "Broad",
+        )
+        strategy_queries = build_queries_for_mode(
+            strategy,
+            retrieval_mode,
+        )
+
+        logger.info(
+            "MANUAL STRATEGY RETRIEVAL | mode=%s | query_count=%d",
+            retrieval_mode,
+            len(strategy_queries),
+        )
 
         raw = []
+        query_diagnostics = []
+        query_family_sets = []
 
-        for strategy_query in strategy_queries:
+        seen_publication_ids = set()
+        seen_family_keys = set()
+
+        for query_index, strategy_query in enumerate(
+            strategy_queries,
+            start=1,
+        ):
             if not strategy_query:
                 continue
 
             logger.info(
-                "USPTO STRATEGY SEARCH | path=%s | query=%s",
-                "Manual Search Strategy",
+                "USPTO STRATEGY SEARCH | mode=%s | query=%d/%d | query=%s",
+                retrieval_mode,
+                query_index,
+                len(strategy_queries),
                 strategy_query,
             )
 
@@ -1682,16 +1878,82 @@ def _run_search(queries: list[str]) -> tuple[list, list]:
                 offset=0,
             )
 
-            logger.info(
-                "SEARCH RESULT | path=%s | count=%d",
-                "Manual Search Strategy",
-                len(results),
+            valid_results = [
+                patent for patent in results
+                if patent is not None
+            ]
+
+            # Match the normalization and family fallback rules
+            # used by services.dedup_service.
+            from services.dedup_service import (
+                _publication_key,
+                _family_key,
             )
 
-            for patent in results:
-                if patent is None:
-                    continue
+            new_publication_ids = set()
+            new_family_keys = set()
+            query_family_keys = set()
 
+            missing_publication_id_count = 0
+            missing_family_id_count = 0
+
+            for patent in valid_results:
+                publication_id = _publication_key(patent)
+
+                if not publication_id:
+                    missing_publication_id_count += 1
+                elif publication_id not in seen_publication_ids:
+                    new_publication_ids.add(publication_id)
+
+                family_id = str(
+                    getattr(patent, "continuity_family_id", "") or ""
+                ).strip()
+
+                if not family_id:
+                    missing_family_id_count += 1
+
+                family_key = _family_key(patent)
+
+                if family_key:
+                    query_family_keys.add(family_key)
+
+                    if family_key not in seen_family_keys:
+                        new_family_keys.add(family_key)
+
+            seen_publication_ids.update(new_publication_ids)
+            seen_family_keys.update(new_family_keys)
+            query_family_sets.append(
+                (query_index, strategy_query, query_family_keys)
+            )
+
+            query_diagnostics.append(
+                {
+                    "query_index": query_index,
+                    "query": strategy_query,
+                    "raw_count": len(results),
+                    "valid_count": len(valid_results),
+                    "new_publications": len(new_publication_ids),
+                    "new_families": len(new_family_keys),
+                    "missing_publication_id_count": (
+                        missing_publication_id_count
+                    ),
+                    "missing_family_id_count": (
+                        missing_family_id_count
+                    ),
+                }
+            )
+
+            logger.info(
+                "RETRIEVAL DIAGNOSTIC | mode=%s | query=%d | "
+                "valid=%d | new_publications=%d | new_families=%d",
+                retrieval_mode,
+                query_index,
+                len(valid_results),
+                len(new_publication_ids),
+                len(new_family_keys),
+            )
+
+            for patent in valid_results:
                 path_name = "Manual Search Strategy"
                 existing_paths = list(
                     getattr(patent, "search_paths", []) or []
@@ -1700,22 +1962,46 @@ def _run_search(queries: list[str]) -> tuple[list, list]:
                 if path_name not in existing_paths:
                     patent.search_paths = existing_paths + [path_name]
 
-            raw.extend(results)
+            raw.extend(valid_results)
+
+        query_overlap_diagnostics = calculate_pairwise_query_overlap(
+            query_family_sets
+        )
 
         unique = deduplicate(raw)
 
+        concept_coverage = calculate_retrieval_concept_coverage(
+            unique,
+            strategy,
+        )
+
+        st.session_state.manual_retrieval_diagnostics = {
+            "mode": retrieval_mode,
+            "query_count": len(query_diagnostics),
+            "queries": query_diagnostics,
+            "query_overlap": query_overlap_diagnostics,
+            "raw_count": len(raw),
+            "unique_count": len(unique),
+            "concept_coverage": concept_coverage,
+        }
+
         from collections import Counter
+
         path_counter = Counter()
         for patent in unique:
             for path in getattr(patent, "search_paths", []):
                 path_counter[path] += 1
+
         logger.info(
             "UNIQUE CONTRIBUTION BY SEARCH PATH: %s",
             dict(path_counter),
         )
 
         logger.info(
-            "USPTO strategy search — %d raw, %d unique patents",
+            "USPTO strategy search — mode=%s, queries=%d, "
+            "raw=%d, unique=%d",
+            retrieval_mode,
+            len(query_diagnostics),
             len(raw),
             len(unique),
         )
@@ -2264,6 +2550,142 @@ with tab_search:
         m1.metric("Raw fetched",  raw_count)
         m2.metric("After dedup",  unique_count)
         m3.metric("Duplicates removed", dupes)
+
+        _manual_diag = st.session_state.get(
+            "manual_retrieval_diagnostics"
+        )
+
+        if _manual_diag and _manual_diag.get("queries"):
+            st.markdown("### Conventional Retrieval Diagnostics")
+
+            st.caption(
+                f"Mode: {_manual_diag['mode']} · "
+                f"Queries executed: {_manual_diag['query_count']}"
+            )
+
+            st.info(
+                "These measurements describe retrieval volume and "
+                "query contribution. They do not, by themselves, "
+                "establish patent relevance or novelty."
+            )
+
+            _diag_rows = [
+                {
+                    "Query #": item["query_index"],
+                    "Query": item["query"],
+                    "Raw results": item["raw_count"],
+                    "Valid records": item["valid_count"],
+                    "New identifiable publications": (
+                        item["new_publications"]
+                    ),
+                    "New families": item["new_families"],
+                    "Missing publication IDs": (
+                        item["missing_publication_id_count"]
+                    ),
+                    "Missing family IDs": item["missing_family_id_count"],
+                }
+                for item in _manual_diag["queries"]
+            ]
+
+            st.dataframe(
+                pd.DataFrame(_diag_rows),
+                width="stretch",
+                hide_index=True,
+            )
+
+            _diag_col1, _diag_col2 = st.columns(2)
+
+            _diag_col1.metric(
+                "Raw records",
+                _manual_diag["raw_count"],
+            )
+            _diag_col2.metric(
+                "Deduplicated records",
+                _manual_diag["unique_count"],
+            )
+
+            _coverage = _manual_diag.get("concept_coverage")
+
+            if _coverage:
+                st.markdown("### Critical Concept Coverage")
+
+                st.caption(
+                    "Coverage is calculated across deduplicated patent "
+                    "records using literal matches in titles, abstracts, "
+                    "or claims."
+                )
+
+                _coverage_col1, _coverage_col2 = st.columns(2)
+
+                _coverage_col1.metric(
+                    "Critical concepts",
+                    _coverage["critical_concept_count"],
+                )
+
+                _coverage_col2.metric(
+                    "Records matching any critical concept",
+                    (
+                        f'{_coverage["records_with_any_critical_match"]} '
+                        f'/ {_coverage["total_records"]}'
+                    ),
+                )
+
+                if _coverage["per_concept"]:
+                    _coverage_rows = [
+                        {
+                            "Critical concept": item["concept"],
+                            "Matched records": item["matched_records"],
+                            "Total records": item["total_records"],
+                            "Coverage (%)": item["coverage_pct"],
+                        }
+                        for item in _coverage["per_concept"]
+                    ]
+
+                    st.dataframe(
+                        pd.DataFrame(_coverage_rows),
+                        width="stretch",
+                        hide_index=True,
+                    )
+
+                _unmatched = _coverage["unmatched_concepts"]
+
+                if _coverage["total_records"] == 0:
+                    st.info(
+                        "No deduplicated records were retrieved. "
+                        "Coverage cannot yet be assessed."
+                    )
+                elif _unmatched:
+                    st.warning(
+                        "No literal matches were found for these critical "
+                        "concepts: " + ", ".join(_unmatched)
+                    )
+                else:
+                    st.success(
+                        "Every critical concept has at least one literal "
+                        "match in the retrieved records."
+                    )
+
+                st.caption(_coverage["warning"])
+
+            _overlap_rows = _manual_diag.get("query_overlap", [])
+
+            if _overlap_rows:
+                st.markdown("### Query Overlap Analysis")
+                st.caption(
+                    "Pairwise comparison of identifiable patent families. "
+                    "Jaccard overlap = shared families / distinct families "
+                    "across both queries."
+                )
+
+                st.dataframe(
+                    pd.DataFrame(_overlap_rows),
+                    width="stretch",
+                    hide_index=True,
+                )
+            else:
+                st.caption(
+                    "Query overlap requires at least two executed queries."
+                )
 
         _path_results = st.session_state.get(
             "ai_search_path_results",

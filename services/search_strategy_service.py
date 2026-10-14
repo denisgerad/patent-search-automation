@@ -443,6 +443,34 @@ def build_core_pair_queries(strategy: SearchStrategy) -> list[str]:
     return pairwise_queries
 
 
+def build_queries_for_mode(
+    strategy: SearchStrategy,
+    mode: str = "Balanced",
+) -> list[str]:
+    """Build retrieval queries for the selected conventional search mode."""
+
+    selected_mode = str(mode).strip().lower()
+
+    if selected_mode == "broad":
+        return build_search_queries(strategy)
+
+    if selected_mode == "balanced":
+        individual_queries = build_search_queries(strategy)
+        pair_queries = build_core_pair_queries(strategy)
+
+        # Avoid duplicate queries while preserving order.
+        return list(dict.fromkeys(individual_queries + pair_queries))
+
+    if selected_mode == "strict":
+        strict_query = build_boolean_search(strategy)
+        return [strict_query] if strict_query else []
+
+    raise ValueError(
+        f"Unsupported retrieval mode: {mode!r}. "
+        "Expected Broad, Balanced, or Strict."
+    )
+
+
 def build_uspto_search_strings(strategy: SearchStrategy) -> dict[str, str]:
     """
     Build field-specific USPTO Patent Public Search expressions

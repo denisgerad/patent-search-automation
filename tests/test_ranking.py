@@ -84,8 +84,8 @@ class TestImportanceScoring(unittest.TestCase):
 
         score, hits = _calculate_importance_score(patent, strategy)
 
-        # One critical concept matched: 5 / (5 + 3).
-        self.assertAlmostEqual(score, 5 / 8)
+        # One critical concept matched: 15 / (15 + 5).
+        self.assertAlmostEqual(score, 15 / 20)
         self.assertTrue(hits["Dynamic fraud scoring"])
         self.assertFalse(hits["Device profiling"])
 

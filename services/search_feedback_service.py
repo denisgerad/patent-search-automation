@@ -333,6 +333,9 @@ def review_search_results(
         "Review all supplied patents and return the required JSON."
     )
 
+    if hasattr(client, "set_usage_stage"):
+        client.set_usage_stage("Evidence review")
+
     last_error = None
     previous_raw = None
 

@@ -1,5 +1,109 @@
 # Patent Intelligence System -- Architecture & Code Flow
 
+## Current Implementation Notes — 2026-10-12
+
+> This section records behaviour verified against the source excerpts reviewed
+> on 2026-10-12. Where older sections conflict with this section, the discrepancy
+> must be checked against the current source before the older description is relied on.
+
+### Application entry paths
+
+The repository contains two distinct application paths:
+
+1. **Streamlit search workflow** — `streamlit_app.py` contains separate query
+   expansion, search and deduplication workflows. The inspected code references
+   `_run_expand`, `_run_search`, `_run_search_json` and
+   `search_patents_by_strategy`. Do not assume every Streamlit search invokes
+   `orchestrator.patent_pipeline.run_pipeline`.
+2. **Orchestrated pipeline** — `orchestrator/patent_pipeline.py` exposes
+   `run_pipeline(query, ...)` and returns a `PipelineResult`.
+
+The exact relationship between all Streamlit search modes and the orchestrated
+pipeline requires further source verification.
+
+### Verified orchestrated pipeline
+
+For a normal query that returns patents, the observed stage order is:
+
+1. Resolve the configured search backend.
+2. Extract critical tokens and expand the query.
+3. Validate expanded queries against domain constraints.
+4. Retrieve patents through the selected backend.
+5. Deduplicate patent records.
+6. Check records against source/backend expectations.
+7. Embed patent text and the query.
+8. Rank candidates using the ranking service and anchor tokens.
+9. Apply the Claude relevance filter.
+10. Generate a structured patent comparison.
+11. Generate a Markdown report.
+12. If `save_to_db=True`, persist patents and write a timestamped Markdown
+    report under the configured report directory.
+
+If no patents are returned, the pipeline returns a no-results `PipelineResult`
+before embedding, ranking, comparison, or persistence.
+
+### Search backend selection
+
+The orchestrator's `_resolve_backend()` supports `epo`, `uspto`,
+`patentsview` and `auto`. In `auto` mode, it selects EPO when an EPO consumer
+key is configured; otherwise it selects PatentsView when its API key is
+configured. If neither key is available, it raises an error.
+
+The orchestrator does not cross-fallback between EPO and PatentsView during
+search. Other provider modules in the repository do not, by their presence
+alone, establish that those providers are used by this orchestrated path.
+
+### AI client wiring
+
+`services/query_expansion.py` imports and calls `models.claude_client.ClaudeClient`.
+The orchestrator's `_get_mistral()` also constructs `ClaudeClient`, despite
+the variable and parameter names containing `mistral`. Therefore, query
+expansion in this path is Claude-powered in the inspected implementation.
+
+A separate `models/mistral_client.py` implements local inference through Ollama,
+but its existence does not establish that it is wired into this pipeline.
+
+Claude is also passed to the relevance filter, comparison service and report
+service. The embedding model is constructed using `settings.embedding_model`.
+
+### Ranking and output contracts
+
+`models/schemas.py` defines `PatentRecord`, `RankedPatent` and `PipelineResult`.
+A ranked record includes cosine, BM25 and hybrid scores, coverage, concept-hit
+information, importance-related fields and text-availability metadata.
+
+The current configuration defaults include the BGE-large-en-v1.5 embedding
+model, cosine weight 0.7, BM25 weight 0.3 and top-k value 10. These are
+configuration defaults, not evidence that every search mode uses identical
+ranking settings.
+
+`PipelineResult` contains the original query, expanded queries, ranked patents,
+comparison summary and Markdown report.
+
+### Persistence
+
+When persistence is enabled, the orchestrator calls `save_patents()`, whose
+repository documentation describes MySQL storage and a JSON cache. It also
+writes the generated Markdown report to the configured report directory.
+When `save_to_db=False`, this persistence block is skipped.
+
+### Documentation and verification gaps
+
+- `README.md` and `tests/test_pipeline.py` were empty in the inspected working
+  tree on 2026-10-12.
+- The existing architecture sections contain older descriptions that may not
+  match current code, including the query-expansion client and search-flow
+  descriptions.
+- The latest reported test-suite result was 41 passing tests. This verifies the
+  tests that were run; it does not by itself validate live-provider search
+  quality or establish real-world patent relevance.
+- The contractor-matching search example is a candidate real-world search-quality
+  test case. Its returned result and scores should be evaluated in the search
+  quality workstream, not treated as proof of patent relevance or patentability.
+
+---
+
+
 ---
 
 ## Table of Contents
@@ -19,21 +123,26 @@
 
 ## 1. System Overview
 
-The Patent Intelligence System automates the manual process of patent prior-art search. A user submits a natural-language invention description; the system returns a ranked, domain-validated list of relevant patents with a Claude-generated comparison report.
+The Patent Intelligence System supports patent prior-art discovery from a natural-language invention description. It retrieves candidate patent records, deduplicates them, ranks them using semantic and keyword signals, and can generate an evidence-oriented comparison and Markdown report.
 
-**Technology Stack**
+### Current technology and implementation
 
-| Layer | Technology |
+| Layer | Current implementation |
 |---|---|
-| Query expansion | Mistral 7B (via Ollama or Mistral API) |
-| Patent search | EPO OPS 3.2 API / PatentsView API |
-| Embeddings | BGE-large-en-v1.5 (sentence-transformers) |
-| Keyword ranking | BM25 (rank-bm25) |
-| Comparison & report | Claude 3.5 Sonnet (Anthropic API) |
-| API layer | FastAPI |
-| Storage | SQLite (SQLAlchemy Core) + FAISS vector cache |
+| User interface | Streamlit application (`streamlit_app.py`) |
+| Orchestration | `orchestrator/patent_pipeline.py::run_pipeline` |
+| Search | Configurable EPO, USPTO and PatentsView backend paths |
+| Query expansion | Claude client in the inspected orchestrated pipeline |
+| Embeddings | Sentence Transformers with `BAAI/bge-large-en-v1.5` by default |
+| Keyword ranking | BM25 |
+| Ranking | Cosine filtering, weighted hybrid scoring, coverage/anchor adjustment, importance-aware scoring and continuity-family deduplication |
+| Comparison and report | Claude-backed services when configured |
+| Persistence | MySQL repository and JSON cache/report output through the persistence path |
+| Tests | Pytest regression and acceptance tests |
 
----
+The Streamlit UI also has search workflows that call search services directly. Do not assume every UI action goes through `run_pipeline()`.
+
+The existence of `models/mistral_client.py` does not establish that Mistral is used by the orchestrated query-expansion path. Likewise, do not describe FastAPI, SQLite or a FAISS search corpus as active components without separate evidence from the current code.
 
 ## 2. Project Structure
 
@@ -487,202 +596,121 @@ LLM analysis
 
 ## 6. Data Contracts
 
-### `ExtractedTokens`
-
-```python
-@dataclass
-class ExtractedTokens:
-    critical_tokens:  list[str]    # flat -- ["infrared", "lane detection"]
-    domain_concepts:  list[str]    # ordered by discriminating power
-    patent_synonyms:  list[str]    # flat -- used in CQL + validation
-    original_query:   str
-    concept_groups:   dict         # {concept: {type, terms, synonyms, matched}}
-    primary_anchor:   str          # single best anchor -- "lane detection"
-    primary_concept:  str          # concept name -- "lane_detection"
-    taxonomy_miss:    bool = False  # True if no taxonomy match
-```
+The current Pydantic schemas in `models/schemas.py` are the source of truth for these contracts.
 
 ### `PatentRecord`
 
-```python
-class PatentRecord(BaseModel):
-    patent_id:       str
-    patent_title:    str
-    patent_abstract: Optional[str] = None
-    patent_claims:   Optional[str] = None   # from /biblio,claims constituent
-    patent_type:     Optional[str] = None
-    patent_date:     Optional[str] = None
-```
+A retrieved patent record contains:
+
+- `patent_id` and `patent_title`
+- Optional `patent_abstract`, `patent_claims`, `patent_type` and `patent_date`
+- Optional `continuity_family_id`
+- `search_paths`
+- Optional USPC fields and CPC/IPC classification lists
+
+### `SearchStrategy`
+
+The approved search strategy contains the original input, key inventive points, and structured `SearchConcept` objects. Each concept has a name, importance, terms and an operator. The schema also defines proximity rules and related strategy fields; consult `models/schemas.py` for the complete contract.
 
 ### `RankedPatent`
 
-```python
-class RankedPatent(BaseModel):
-    patent:          PatentRecord
-    cosine_score:    float         # raw cosine (0.0-1.0)
-    bm25_score:      float         # raw BM25 (unbounded, pre-normalisation)
-    hybrid_score:    float         # penalised hybrid (0.0-1.0)
-    coverage:        float         # concept coverage (0.0-1.0)
-    concept_hits:    dict          # {"lane_detection": True, "sensor": False}
-```
+Each ranked record includes the underlying `PatentRecord`, cosine, BM25 and hybrid scores, coverage, concept hits, search paths, importance score/hits, and text-availability status/character count.
+
+`importance_score` may be `None` when the patent text is insufficient to support the importance calculation. Coverage and importance values should therefore be interpreted alongside text availability.
 
 ### `PipelineResult`
 
-```python
-class PipelineResult(BaseModel):
-    query:              str
-    backend:            str                  # "epo" | "patentsview"
-    expanded_queries:   list[str]
-    validated_queries:  list[str]
-    primary_anchor:     str
-    domain_concepts:    list[str]
-    ranked_patents:     list[RankedPatent]
-    comparison_json:    str
-    report_markdown:    str
-    taxonomy_miss:      bool = False
-    error:              Optional[str] = None
-```
+The current pipeline result contains:
 
----
+- `query`
+- `expanded_queries`
+- `ranked_patents`
+- `comparison_summary`
+- `report_markdown`
+
+Do not document older fields such as `comparison_json`, `validated_queries`, `backend` or `primary_anchor` as `PipelineResult` fields unless the schema is changed and verified.
 
 ## 7. Search Backend Routing
 
-```
-_resolve_backend()
-│
-├── reads .env via Pydantic Settings (strip() applied to all keys)
-│
-├── epo_consumer_key present and non-empty?
-│   └── YES → SearchBackend.EPO
-│
-├── patentsview_api_key present and non-empty?
-│   └── YES → SearchBackend.PATENTSVIEW
-│
-└── neither → RuntimeError (fail fast, no silent fallback)
+The orchestrator resolves a backend before searching and then dispatches to the corresponding search path.
 
-Rules:
-  - Backend resolved ONCE at pipeline start
-  - EPO and PatentsView are mutually exclusive -- no cross-fallback
-  - _assert_source() validates patent_id format matches backend
-    PatentsView IDs: numeric only (10000000)
-    EPO IDs:         country.number.kind (US.12345.A1)
-```
+The supported configuration values are `auto`, `epo`, `uspto` and `patentsview`. The explicit `uspto` path uses `fetch_patents_with_fallback`; the `patentsview` path uses the PatentsView search implementation; and `epo` uses the EPO search implementation.
 
----
+In `auto` mode, the inspected resolver selects EPO when the EPO consumer key is configured; otherwise it selects the PatentsView path when the PatentsView API key is configured. If neither credential is available, it raises an error. Backend resolution does not mean the pipeline automatically retries a failed EPO search against a different backend.
+
+The orchestrated pipeline also validates source/identifier consistency. Do not describe all backend paths as interchangeable: their retrieval methods and expected identifier formats differ.
+
+The Streamlit application's direct search workflows are separate entry paths and should be documented independently from `run_pipeline()`.
 
 ## 8. Ranking & Scoring
 
-### Score Computation
+The active ranking implementation is `services/ranking_service.py::rank`. Its current behaviour is:
 
-```
-For each patent in corpus:
+1. Compute cosine similarity between the query embedding and candidate document embeddings.
+2. Apply a cosine threshold, starting from `settings.cosine_threshold` and relaxing in steps of 0.05 down to `settings.cosine_threshold_min` if too few candidates pass.
+3. Build a BM25 index and calculate BM25 scores for the cosine-filtered candidate set.
+4. Combine raw cosine similarity with batch-min-max-normalised BM25:
 
-  cosine  = query_vec . doc_vec           (L2-normalised vectors)
-  bm25    = BM25Okapi.get_scores(query)   (raw keyword frequency score)
+   `hybrid = cosine_weight * cosine + bm25_weight * normalised_BM25`
 
-  cosine_norm = (cosine - min) / (max - min + eps)
-  bm25_norm   = (bm25   - min) / (max - min + eps)
+   The default weights are 0.7 cosine and 0.3 BM25. Configuration normalises the weights when their positive sum differs from 1.
+5. If extracted token concept groups are available, calculate concept coverage and apply a **linear** coverage multiplier in the active path. Otherwise, apply the binary anchor penalty to candidates that contain none of the supplied anchor terms.
+6. If a search strategy is provided and sufficient text is available, calculate importance-weighted concept coverage. Critical concepts have a greater weight than important and supporting concepts. Missing critical concepts incur an additional multiplier. When text is insufficient, this adjustment is skipped.
+7. Calculate the elbow threshold as a quality signal. If fewer than the requested number of candidates pass, fall back to the highest-scoring candidates from the cosine-filtered set.
+8. Sort by adjusted hybrid score and return up to `top_k` distinct continuity families. If family deduplication leaves too few results, consider remaining candidates below the dynamic threshold, in score order.
 
-  raw_hybrid  = 0.6 * cosine_norm + 0.4 * bm25_norm
+### Important interpretation notes
 
-  coverage    = matched_concept_groups / total_concept_groups
-  penalty_multiplier = coverage^2         (quadratic curve)
-
-  final_score = raw_hybrid * penalty_multiplier
-```
-
-### Coverage Penalty Examples
-
-| Patent matches | Coverage | Multiplier | Effect |
-|---|---|---|---|
-| All 3 concepts | 1.00 | 1.00 | No penalty |
-| 2 of 3 concepts | 0.67 | 0.45 | Moderate drop |
-| 1 of 3 concepts | 0.33 | 0.11 | Heavy penalty |
-| 0 concepts | 0.00 | 0.00 | Eliminated |
-
-### Dynamic Threshold (Elbow Strategy)
-
-```
-scores sorted descending: [0.85, 0.81, 0.74, 0.71, 0.38, 0.12, 0.09]
-diffs:                     [0.04, 0.07, 0.03, 0.33, 0.26, 0.03]
-                                                ↑
-                                         sharpest drop
-threshold = 0.71  (score just before the elbow)
-→ patents below 0.71 discarded
-```
-
----
+- BM25 is normalised over the cosine-filtered candidate batch, so its normalised values depend on that batch.
+- Cosine scores are used directly rather than min-max-normalised across the batch.
+- The active coverage call uses `penalty_curve="linear"`, even though the helper supports other curves.
+- `retrieval/similarity.py::compute_dynamic_threshold` supports elbow, mean-plus-standard-deviation and percentile strategies, but the active ranking path calls it with `strategy="elbow"`.
+- The dynamic threshold does not necessarily reduce the final output count: fallback logic attempts to fill the requested `top_k` from available candidates.
+- Family deduplication applies when a record has a `continuity_family_id`; records without one are treated as unique.
+- Ranking scores are candidate-ordering signals, not proof of novelty, patentability or legal relevance.
 
 ## 9. Configuration Reference
 
-```python
-# app/config.py
+The current settings are defined in `app/config.py`. The following defaults are relevant to the inspected pipeline:
 
-class Settings(BaseSettings):
-    # API Keys (strip whitespace -- prevents .env trailing space bugs)
-    patentsview_api_key:  str   = ""
-    epo_consumer_key:     str   = ""
-    epo_consumer_secret:  str   = ""
-    anthropic_api_key:    str   = ""
+| Setting | Default or behaviour |
+|---|---|
+| `patent_search_backend` | `auto` |
+| `anthropic_model` | `claude-sonnet-4-6` |
+| `mistral_model` | `mistral` (configured, but not evidence that the orchestrated path uses it) |
+| `embedding_model` | `BAAI/bge-large-en-v1.5` |
+| `cosine_weight` | `0.7` |
+| `bm25_weight` | `0.3` |
+| `top_k_results` | `10` |
+| `claude_top_k` | `3` |
+| `cosine_threshold` | `0.70` |
+| `cosine_threshold_min` | `0.30` |
+| `cosine_min_candidates` | `5` |
+| `hybrid_threshold` | `0.65` |
+| Database | MySQL; defaults to `localhost`, user `root`, database `patent_db` |
 
-    # Models
-    mistral_model:        str   = "mistral"
-    embedding_model:      str   = "BAAI/bge-large-en-v1.5"
-    claude_model:         str   = "claude-3-5-sonnet-20241022"
+Environment values can override settings where supported. API credentials are optional at configuration level, but individual backends or Claude-backed features may require their corresponding credentials. Check the selected workflow before assuming that every configured setting is used by every entry path.
 
-    # Search
-    patent_fields:        list  = ["patent_id","patent_title",
-                                   "patent_abstract","patent_type","patent_date"]
-    patent_page_size:     int   = 100
-    max_results:          int   = 500
-    max_pages:            int   = 5
-    epo_max_results:      int   = 25
-    epo_min_results:      int   = 10
-
-    # Ranking
-    cosine_weight:        float = 0.6
-    bm25_weight:          float = 0.4
-    coverage_curve:       str   = "quadratic"   # linear | quadratic | step
-    threshold_strategy:   str   = "elbow"        # elbow | mean_plus_std | top_k_pct
-
-    # LLM
-    comparison_top_k:     int   = 10
-    relevance_filter_k:   int   = 20
-    max_tokens_compare:   int   = 4096
-    max_tokens_report:    int   = 8192
-
-    class Config:
-        env_file = ".env"
-
-    @validator("*", pre=True)
-    def strip_strings(cls, v):
-        return v.strip() if isinstance(v, str) else v
-```
-
----
+`PATENT_PAGE_SIZE` is a central operational constant; it is not the same setting as `top_k_results`.
 
 ## 10. Key Design Decisions
 
 ### Separation of concerns
 
-Models (`models/`) are pure HTTP/SDK wrappers with no business logic. Business logic lives exclusively in services (`services/`). Infrastructure (BM25, vector store, cosine) lives in retrieval (`retrieval/`). The orchestrator (`orchestrator/patent_pipeline.py`) calls services in order but contains no logic of its own.
+The code separates model/API wrappers (`models/`), application services (`services/`), retrieval utilities (`retrieval/`) and the orchestrator (`orchestrator/patent_pipeline.py`). The Streamlit application also contains direct search paths, so not all user workflows are necessarily routed through the orchestrator.
 
-### Vector store is a cache, not a corpus
+### Vector storage and persistence
 
-The ranking corpus always comes from live search results. The vector store only caches embeddings by `patent_id` to avoid recomputing them on repeated queries. These two roles must never be swapped.
+Describe a vector store as a cache only if the relevant implementation confirms that role. The inspected pipeline embeds the current retrieved candidate set for ranking; persistent patent/report saving occurs through the pipeline's persistence path when `save_to_db=True`. Do not describe SQLite or a FAISS corpus as the active database/search corpus without further implementation evidence.
 
-### Primary anchor drives discriminating search
+### Search strategy and anchors
 
-The token extractor ranks matched concepts by discriminating power before passing them to the EPO CQL builder. Task concepts (`"lane detection"`, power=1) anchor the search. Sensor concepts (`"infrared"`, power=4) are supporting constraints. This prevents generic terms from dominating CQL and returning off-domain results.
+The ranking service can use extracted token concept groups for coverage adjustment and uses anchor terms as a fallback when those groups are unavailable. When an approved `SearchStrategy` is supplied, concept importance can further adjust ranking. These mechanisms are distinct and should not be conflated into a single quadratic coverage formula.
 
-### Coverage penalty enforces multi-concept relevance
+### Embeddings and ranking
 
-A patent that mentions only `"infrared"` (1 of 3 concepts) scores `0.11*` its raw hybrid score due to the quadratic coverage penalty. This handles the case where BM25 inflates a score because a single term appears frequently -- the penalty demotes it without requiring manual threshold tuning.
+The default embedding model is BGE-large-en-v1.5. The embedding service is responsible for embedding query and patent text. Ranking uses cosine similarity and BM25 with configurable weights; the exact score adjustments are described in Section 8.
 
-### BGE-large asymmetric embedding
+### Backend failure behaviour
 
-Queries are embedded with the instruction prefix `"Represent this sentence for searching relevant passages: "`. Documents are embedded without any prefix. This asymmetry is required by the BGE-large model for retrieval tasks -- symmetric embedding produces unreliable similarity scores.
-
-### No silent cross-backend fallback
-
-If EPO returns fewer than `MIN_RESULTS` patents, the system logs a warning and returns what it has. It does not fall through to PatentsView. This prevents the bug where PatentsView (which may be unreachable or misconfigured) silently receives queries intended for EPO, returning entirely wrong results.
+The orchestrated pipeline resolves one backend for a run and dispatches to that backend's implementation. Do not claim cross-backend failover unless a specific search function implements and tests it.

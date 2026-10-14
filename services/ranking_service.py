@@ -196,13 +196,63 @@ def _importance_weight(importance: str) -> float:
     """Convert SearchConcept importance into a ranking weight."""
 
     return {
-        "critical": 5.0,
-        "important": 3.0,
+        "critical": 15.0,
+        "important": 5.0,
         "supporting": 1.0,
     }.get(
         str(importance).strip().lower(),
         1.0,
     )
+
+
+def _calculate_concept_coverage(
+    patent: PatentRecord,
+    search_strategy=None,
+) -> dict:
+    """Measure literal coverage of approved concepts for diagnostics only."""
+    if search_strategy is None:
+        return {
+            "coverage": 0.0,
+            "matched_concepts": 0,
+            "total_concepts": 0,
+            "concept_hits": {},
+        }
+
+    concepts = getattr(search_strategy, "concepts", [])
+    text_parts = [
+        patent.patent_title or "",
+        patent.patent_abstract or "",
+        patent.patent_claims or "",
+    ]
+    text = " ".join(text_parts).lower()
+    text = re.sub(r"[-_]+", " ", text)
+    text = re.sub(r"\s+", " ", text)
+
+    concept_hits = {}
+
+    for concept in concepts:
+        name = str(getattr(concept, "name", "")).strip()
+        terms = [
+            re.sub(r"\s+", " ", re.sub(r"[-_]+", " ", str(term).strip().lower()))
+            for term in getattr(concept, "terms", [])
+            if str(term).strip()
+        ]
+
+        if not name or not terms:
+            continue
+
+        # Coverage is diagnostic: any approved alternative term is a hit.
+        concept_hits[name] = any(term in text for term in terms)
+
+    total = len(concept_hits)
+    matched = sum(concept_hits.values())
+
+    return {
+        "coverage": matched / total if total else 0.0,
+        "matched_concepts": matched,
+        "total_concepts": total,
+        "concept_hits": concept_hits,
+    }
 
 
 def _calculate_importance_score(

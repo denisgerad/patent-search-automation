@@ -627,6 +627,9 @@ def generate_query_plan(
         "Create the required structured query plan."
     )
 
+    if hasattr(client, "set_usage_stage"):
+        client.set_usage_stage("Search plan generation")
+
     last_error = None
 
     for attempt in range(2):

@@ -4037,6 +4037,30 @@ with tab_rank:
 
         rows = []
         for i, rp in enumerate(st.session_state.ranked, 1):
+            strategy = st.session_state.get("search_strategy")
+            critical_names = {
+                concept.name
+                for concept in (getattr(strategy, "concepts", []) or [])
+                if str(concept.importance).strip().lower() == "critical"
+            }
+            evaluated_critical = critical_names.intersection(rp.importance_hits)
+            matched_critical = sum(
+                bool(rp.importance_hits[name])
+                for name in evaluated_critical
+            )
+
+            critical_match_summary = (
+                f"{matched_critical}/{len(evaluated_critical)}"
+                if evaluated_critical
+                else "Not evaluated"
+            )
+
+            evidence_status = (
+                "Insufficient text"
+                if rp.text_status == "insufficient_text"
+                else "Text available"
+            )
+
             rows.append({
                 "#": i,
                 "patent_id": rp.patent.patent_id,
@@ -4053,6 +4077,8 @@ with tab_rank:
                     else None
                 ),
                 "text_status": rp.text_status,
+                "evidence_status": evidence_status,
+                "critical_concepts_matched": critical_match_summary,
                 "cosine": (
                     round(rp.cosine_score, 4)
                     if rp.cosine_score is not None else None

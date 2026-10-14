@@ -499,9 +499,8 @@ def search_patents_by_strategy(
 ) -> list[PatentRecord]:
     """Search USPTO ODP using a provider-ready Boolean strategy expression.
 
-    Unlike search_patents(), this function sends the supplied expression
-    directly as the ODP q parameter. It is intended for approved
-    SearchStrategy expressions.
+    Retries HTTP 413 responses with smaller page sizes, preserving the
+    query and offset. This helps avoid the USPTO's response-size limit.
     """
     headers = _build_headers()
     headers["Content-Type"] = "application/json"
@@ -511,20 +510,47 @@ def search_patents_by_strategy(
     if not query:
         return []
 
-    payload = {
-        "q": query,
-        "pagination": {
-            "offset": offset,
-            "limit": min(limit, 100),
-        },
-    }
+    requested_limit = max(1, min(limit, 100))
+    retry_limits = [
+        size for size in (25, 10, 5, 1)
+        if size < requested_limit
+    ]
+    attempt_limits = [requested_limit, *retry_limits]
 
-    response = requests.post(
-        USPTO_SEARCH_URL,
-        headers=headers,
-        json=payload,
-        timeout=30,
-    )
+    # Remove duplicate sizes while preserving order.
+    attempt_limits = list(dict.fromkeys(attempt_limits))
+
+    response = None
+    actual_limit = requested_limit
+
+    for actual_limit in attempt_limits:
+        payload = {
+            "q": query,
+            "pagination": {
+                "offset": offset,
+                "limit": actual_limit,
+            },
+        }
+
+        response = requests.post(
+            USPTO_SEARCH_URL,
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+
+        if response.status_code != 413:
+            break
+
+        log.warning(
+            "USPTO response too large (413); retrying with limit=%d "
+            "at offset=%d",
+            actual_limit,
+            offset,
+        )
+
+    if response is None:
+        raise RuntimeError("USPTO strategy search was not attempted.")
 
     if response.status_code == 404:
         log.warning(
@@ -534,6 +560,13 @@ def search_patents_by_strategy(
         )
         return []
 
+    if response.status_code == 413:
+        raise RuntimeError(
+            "USPTO strategy search exceeded the 6 MB response limit "
+            "even at page size 1. The query or returned record fields "
+            "may need further investigation."
+        )
+
     if response.status_code != 200:
         raise RuntimeError(
             f"USPTO strategy search failed "
@@ -541,14 +574,16 @@ def search_patents_by_strategy(
         )
 
     data = response.json()
-
     raw_records = data.get("patentFileWrapperDataBag", [])
 
-    print("\n===== USPTO RESULT =====")
-    print("Query:", query)
-    print("Requested limit:", limit)
-    print("Raw records returned:", len(raw_records))
-    print("========================\n")
+    log.info(
+        "USPTO strategy search returned %d raw records "
+        "(requested limit=%d, actual limit=%d, offset=%d)",
+        len(raw_records),
+        requested_limit,
+        actual_limit,
+        offset,
+    )
 
     records: list[PatentRecord] = []
 

@@ -168,7 +168,7 @@ with st.sidebar:
     st.caption(f"**Embeddings:** {settings.embedding_model}")
 
     st.divider()
-    top_k = st.number_input("Top-K results", min_value=1, max_value=100, value=20)
+    top_k = st.number_input("Top-K results", min_value=1, max_value=100, value=20, key="top_k_results",)
 
     st.divider()
     st.subheader("Claude API")
@@ -192,1489 +192,1673 @@ with st.sidebar:
         for stage, secs in st.session_state.elapsed.items():
             st.caption(f"{stage}: {secs:.1f}s")
 
+    st.divider()
+    st.subheader("📊 Results Workspace")
+    result_view = st.radio(
+        "Open results screen",
+        options=[
+            "Concept Editor",
+            "Query Expansion",
+            "Search Results",
+            "Technical Relevance",
+            "Claude Technical Analysis",
+        ],
+        index=0,
+        key="results_workspace_view_v2",
+        label_visibility="collapsed",
+    )
+    st.caption("Choose a view to open it in the main workspace.")
+
 
 # ── main ────────────────────────────────────────────────────────────────────────
-st.title("🔬 Patent Intelligence")
-st.caption("Test the pipeline stage by stage, or run straight through to Top 20.")
-
-query = st.text_area(
-    "Technology query",
-    value="A system for autonomous vehicle lane detection using infrared sensors",
-    height=80,
-    key="query_input",
+# Persist the Technology query separately from its widget key. Streamlit may clean
+# up widget-owned state when the Concept Editor screen is not rendered; this
+# independent key preserves the user's text while navigating between screens.
+_DEFAULT_TECHNOLOGY_QUERY = (
+    "A system for autonomous vehicle lane detection using infrared sensors"
 )
 
-# ── Phase 1 — Manual Search Strategy ──────────────────────────────────────────
-st.divider()
-st.subheader("🧭 Phase 1 — Manual Search Strategy")
-st.caption(
-    "Define the important concepts and alternative patent terminology before "
-    "running the search. This strategy will later also be used by document-driven search."
+
+def _persist_technology_query():
+    value = st.session_state.get("query_input", _DEFAULT_TECHNOLOGY_QUERY)
+    st.session_state["technology_query_persisted"] = value
+    # Keep the AI concept-generation description aligned with the main query
+    # unless the user has explicitly edited that separate description.
+    if not st.session_state.get("ai_invention_description_user_edited", False):
+        st.session_state["ai_invention_description_persisted"] = value
+
+
+def _persist_ai_invention_description():
+    st.session_state["ai_invention_description_persisted"] = st.session_state.get(
+        "ai_invention_description", st.session_state.get("technology_query_persisted", _DEFAULT_TECHNOLOGY_QUERY)
+    )
+    st.session_state["ai_invention_description_user_edited"] = True
+
+
+if "technology_query_persisted" not in st.session_state:
+    st.session_state["technology_query_persisted"] = st.session_state.get(
+        "query_input", _DEFAULT_TECHNOLOGY_QUERY
+    )
+
+if "ai_invention_description_persisted" not in st.session_state:
+    st.session_state["ai_invention_description_persisted"] = st.session_state.get(
+        "ai_invention_description",
+        st.session_state["technology_query_persisted"],
+    )
+if "ai_invention_description_user_edited" not in st.session_state:
+    st.session_state["ai_invention_description_user_edited"] = False
+
+# Restore widget values only when entering the screen and their widget keys have
+# been cleaned up by Streamlit. Do not overwrite an actively edited widget value.
+if result_view == "Concept Editor" and "query_input" not in st.session_state:
+    st.session_state["query_input"] = st.session_state["technology_query_persisted"]
+if result_view == "Concept Editor" and "ai_invention_description" not in st.session_state:
+    st.session_state["ai_invention_description"] = st.session_state[
+        "ai_invention_description_persisted"
+    ]
+
+query = st.session_state.get(
+    "query_input", st.session_state["technology_query_persisted"]
 )
+run_to_top20 = False
+run_claude = False
 
-# ── AI-assisted concept generation ────────────────────────────────────────────
-st.markdown("### 🤖 AI-Assisted Search Concepts")
-st.caption(
-    "Claude can propose 10 technical concepts with a primary patent search "
-    "term and two alternative terms for each. Review and edit the suggestions "
-    "before using them in the search strategy."
-)
+if result_view == "Concept Editor":
+    st.title("🔬 Patent Intelligence")
+    st.caption("Test the pipeline stage by stage, or run straight through to Top 20.")
 
-if "ai_search_concepts" not in st.session_state:
-    st.session_state.ai_search_concepts = []
+    query = st.text_area(
+        "Technology query",
+        height=80,
+        key="query_input",
+        on_change=_persist_technology_query,
+    )
+    # Keep the local variable and durable session value in sync for downstream
+    # pipeline stages in this run.
+    st.session_state["technology_query_persisted"] = query
 
-if "ai_search_concepts_approved" not in st.session_state:
-    st.session_state.ai_search_concepts_approved = False
+    # ── Phase 1 — Concept editor ─────────────────────────────────────────────────
+    st.divider()
+    st.subheader("🧭 1. Concept Editor")
+    st.caption(
+        "Generate and refine the technical concepts and patent terminology here. "
+        "Approval creates the active search strategy; it does not run a patent search."
+    )
 
-_ai_invention = st.text_area(
-    "Invention description for Claude",
-    value=st.session_state.get("query", ""),
-    height=100,
-    key="ai_invention_description",
-    help="Describe the invention or technology you want to search for.",
-)
+    st.markdown("### 🤖 AI-assisted search concepts")
+    st.caption(
+        "Claude proposes 10 technical concepts, each with a primary term and "
+        "two alternatives. Concepts are collapsed by default to keep this editor compact."
+    )
 
-if st.button("🤖 Generate 10 Search Concepts", key="generate_ai_search_concepts"):
-    if not _ai_invention.strip():
-        st.warning("Please enter an invention description first.")
-    else:
-        try:
-            from models.claude_client import ClaudeClient
-            from services.ai_search_strategy_service import generate_search_concepts
+    if "ai_search_concepts" not in st.session_state:
+        st.session_state.ai_search_concepts = []
 
-            with st.spinner("Claude is generating search concepts…"):
-                generated = generate_search_concepts(
-                    _ai_invention,
-                    ClaudeClient(),
+    if "ai_search_concepts_approved" not in st.session_state:
+        st.session_state.ai_search_concepts_approved = False
+
+    def _invalidate_ai_concept_approval():
+        """Any concept edit invalidates the previously approved strategy."""
+        st.session_state.ai_search_concepts_approved = False
+        st.session_state.search_strategy_approved = False
+        # Do not leave an old strategy visible or accidentally re-approvable.
+        st.session_state.search_strategy = None
+
+
+    _ai_invention = st.text_area(
+        "Invention description for Claude",
+        height=100,
+        key="ai_invention_description",
+        help="Describe the invention or technology you want to search for.",
+        on_change=lambda: (_persist_ai_invention_description(), _invalidate_ai_concept_approval()),
+    )
+    st.session_state["ai_invention_description_persisted"] = _ai_invention
+
+    if st.button("🤖 Generate 10 Search Concepts", key="generate_ai_search_concepts"):
+        if not _ai_invention.strip():
+            st.warning("Please enter an invention description first.")
+        else:
+            try:
+                from models.claude_client import ClaudeClient
+                from services.ai_search_strategy_service import generate_search_concepts
+
+                with st.spinner("Claude is generating search concepts…"):
+                    generated = generate_search_concepts(
+                        _ai_invention,
+                        ClaudeClient(),
+                    )
+
+                st.session_state.ai_search_concepts = generated
+                st.session_state.ai_search_concepts_approved = False
+                st.session_state.search_strategy_approved = False
+                st.session_state.search_strategy = None
+                st.success(
+                    f"Generated {len(generated)} concepts. "
+                    "Review and edit them below."
                 )
 
-            st.session_state.ai_search_concepts = generated
-            st.session_state.ai_search_concepts_approved = False
-            st.success(
-                f"Generated {len(generated)} concepts. "
-                "Review and edit them below."
+            except Exception as exc:
+                st.error(f"Unable to generate search concepts: {exc}")
+
+    _ai_concepts = st.session_state.get("ai_search_concepts", [])
+
+    if _ai_concepts:
+        st.markdown("#### Review and edit concepts")
+        if "ai_concepts_expand_all" not in st.session_state:
+            st.session_state.ai_concepts_expand_all = False
+
+        expand_col, summary_col = st.columns([1, 3])
+        with expand_col:
+            if st.button(
+                "⬆ Collapse all" if st.session_state.ai_concepts_expand_all else "⬇ Expand all",
+                key="ai_concepts_toggle_all",
+            ):
+                st.session_state.ai_concepts_expand_all = not st.session_state.ai_concepts_expand_all
+                st.rerun()
+        with summary_col:
+            st.caption(
+                f"{len(_ai_concepts)} concepts · Expand a row to edit terms, importance, and rationale."
             )
 
-        except Exception as exc:
-            st.error(f"Unable to generate search concepts: {exc}")
+        edited_concepts = []
 
-_ai_concepts = st.session_state.get("ai_search_concepts", [])
+        for index, concept in enumerate(_ai_concepts, start=1):
+            primary_term = concept.get("primary_term", "")
+            alternative_terms = concept.get("alternative_terms", [])
 
-if _ai_concepts:
-    st.markdown("#### Review and edit Claude's suggestions")
+            confidence = str(
+                concept.get("confidence", "low")
+            ).lower()
 
-    edited_concepts = []
-
-    for index, concept in enumerate(_ai_concepts, start=1):
-        st.markdown(f"**Concept {index}**")
-
-        concept_name = st.text_input(
-            "Concept name",
-            value=concept.get("name", ""),
-            key=f"ai_concept_name_{index}",
-        )
-
-        primary_term = concept.get("primary_term", "")
-        alternative_terms = concept.get("alternative_terms", [])
-
-        edited_primary_term = st.text_input(
-            "Primary search term",
-            value=primary_term,
-            key=f"ai_concept_{index}_primary_term",
-        )
-
-        edited_alternative_terms = []
-
-        for alternative_index in range(2):
-            default_alternative = (
-                alternative_terms[alternative_index]
-                if alternative_index < len(alternative_terms)
-                else ""
-            )
-
-            edited_alternative = st.text_input(
-                f"Alternative search term {alternative_index + 1}",
-                value=default_alternative,
-                key=f"ai_concept_{index}_alternative_{alternative_index + 1}",
-            )
-
-            edited_alternative_terms.append(edited_alternative)
-
-        st.caption(
-            "Claude's recommendation: "
-            f"{concept.get('classification_reason', 'No reason provided.')}"
-        )
-
-        confidence = str(concept.get("confidence", "low")).lower()
-        st.caption(f"Classification confidence: {confidence.title()}")
-
-        importance_options = ["critical", "important", "supporting"]
-        recommended_importance = str(
-            concept.get("importance", "important")
-        ).lower()
-
-        if recommended_importance not in importance_options:
-            recommended_importance = "important"
-
-        importance = st.selectbox(
-            "Importance — review or override Claude",
-            importance_options,
-            index=importance_options.index(recommended_importance),
-            key=f"ai_concept_{index}_importance",
-        )
-
-        edited_concepts.append(
-            {
-                "name": concept_name,
-                "primary_term": edited_primary_term,
-                "alternative_terms": edited_alternative_terms,
-                "importance": importance,
-                "classification_reason": concept.get(
-                    "classification_reason",
-                    "No reason provided.",
-                ),
-                "confidence": concept.get("confidence", "low"),
-            }
-        )
-
-        if index < len(_ai_concepts):
-            st.divider()
-
-    st.session_state.ai_search_concepts = edited_concepts
-
-    if st.button(
-        "✅ Approve Reviewed Concepts",
-        key="approve_ai_search_concepts",
-    ):
-        st.session_state.ai_search_concepts_approved = True
-
-        # Populate the existing manual Search Strategy fields.
-        st.session_state.strategy_concept_count = len(edited_concepts)
-
-        for _index, _concept in enumerate(edited_concepts):
-            st.session_state[f"strategy_concept_name_{_index}"] = (
-                _concept.get("name", "").strip()
-            )
-
-            _primary_term = str(
-                _concept.get("primary_term", "")
-            ).strip()
-
-            _alternative_terms = [
-                str(term).strip()
-                for term in _concept.get("alternative_terms", [])
-                if str(term).strip()
+            importance_options = [
+                "critical",
+                "important",
+                "supporting",
             ]
 
-            _search_terms = []
+            recommended_importance = str(
+                concept.get("importance", "important")
+            ).lower()
 
-            if _primary_term:
-                _search_terms.append(_primary_term)
+            if recommended_importance not in importance_options:
+                recommended_importance = "important"
 
-            _search_terms.extend(_alternative_terms)
-
-            st.session_state[f"strategy_concept_terms_{_index}"] = "\n".join(
-                _search_terms
+            # Compact summary shown when the concept is collapsed.
+            concept_label = (
+                f"Concept {index} · "
+                f"{concept.get('name', 'Untitled concept')} · "
+                f"{recommended_importance.title()} · "
+                f"{confidence.title()} confidence"
             )
 
-            st.session_state[f"strategy_concept_importance_{_index}"] = (
-                _concept.get("importance", "important")
+            with st.expander(
+                concept_label,
+                expanded=st.session_state.ai_concepts_expand_all,
+            ):
+                concept_name = st.text_input(
+                    "Concept name",
+                    value=concept.get("name", ""),
+                    key=f"ai_concept_name_{index}",
+                    on_change=_invalidate_ai_concept_approval,
+                )
+
+                edited_primary_term = st.text_input(
+                    "Primary search term",
+                    value=primary_term,
+                    key=f"ai_concept_{index}_primary_term",
+                    on_change=_invalidate_ai_concept_approval,
+                )
+
+                edited_alternative_terms = []
+
+                for alternative_index in range(2):
+                    default_alternative = (
+                        alternative_terms[alternative_index]
+                        if alternative_index < len(alternative_terms)
+                        else ""
+                    )
+
+                    edited_alternative = st.text_input(
+                        f"Alternative search term {alternative_index + 1}",
+                        value=default_alternative,
+                        key=(
+                            f"ai_concept_{index}_alternative_"
+                            f"{alternative_index + 1}"
+                        ),
+                        on_change=_invalidate_ai_concept_approval,
+                    )
+
+                    edited_alternative_terms.append(
+                        edited_alternative
+                    )
+
+                st.caption(
+                    "Claude's recommendation: "
+                    f"{concept.get('classification_reason', 'No reason provided.') }"
+                )
+
+                st.caption(
+                    f"Classification confidence: {confidence.title()}"
+                )
+
+                importance = st.selectbox(
+                    "Importance — review or override Claude",
+                    importance_options,
+                    index=importance_options.index(
+                        recommended_importance
+                    ),
+                    key=f"ai_concept_{index}_importance",
+                    on_change=_invalidate_ai_concept_approval,
+                )
+
+            edited_concepts.append(
+                {
+                    "name": concept_name,
+                    "primary_term": edited_primary_term,
+                    "alternative_terms": edited_alternative_terms,
+                    "importance": importance,
+                    "classification_reason": concept.get(
+                        "classification_reason",
+                        "No reason provided.",
+                    ),
+                    "confidence": concept.get("confidence", "low"),
+                }
             )
 
-            st.session_state[f"strategy_concept_operator_{_index}"] = "OR"
+        st.session_state.ai_search_concepts = edited_concepts
 
-        st.success(
-            "Reviewed concepts approved and loaded into the Search Strategy."
+        if st.button(
+            "✅ Approve Concepts & Search Strategy",
+            type="primary",
+            key="approve_ai_search_concepts",
+        ):
+            _approved_strategy_concepts = []
+            _validation_errors = []
+
+            for _index, _concept in enumerate(edited_concepts):
+                _name = str(_concept.get("name", "")).strip()
+                _primary_term = str(_concept.get("primary_term", "")).strip()
+                _alternative_terms = [
+                    str(term).strip()
+                    for term in _concept.get("alternative_terms", [])
+                    if str(term).strip()
+                ]
+                _terms = ([ _primary_term ] if _primary_term else []) + _alternative_terms
+
+                if not _name:
+                    _validation_errors.append(f"Concept {_index + 1}: add a concept name.")
+                if not _terms:
+                    _validation_errors.append(
+                        f"Concept {_index + 1}: add a primary term or at least one alternative."
+                    )
+
+                if _name and _terms:
+                    _approved_strategy_concepts.append(
+                        SearchConcept(
+                            name=_name,
+                            importance=str(_concept.get("importance", "important")).lower(),
+                            terms=_terms,
+                            operator="OR",
+                        )
+                    )
+
+            if _validation_errors:
+                st.error("Please fix the following before approval:\n- " + "\n- ".join(_validation_errors))
+            elif not _approved_strategy_concepts:
+                st.error("There are no valid concepts to approve.")
+            else:
+                st.session_state.search_strategy = SearchStrategy(
+                    original_input=_ai_invention.strip(),
+                    key_inventive_points=[],
+                    concepts=_approved_strategy_concepts,
+                    concept_operator="AND",
+                    search_fields=["title", "abstract", "claims"],
+                )
+                st.session_state.ai_search_concepts_approved = True
+                st.session_state.search_strategy_approved = True
+                st.session_state.active_search_strategy_source = "concepts"
+
+                # Keep the optional manual editor populated for users who choose to
+                # refine the generated strategy manually later.
+                st.session_state.strategy_concept_count = len(edited_concepts)
+                for _index, _concept in enumerate(edited_concepts):
+                    st.session_state[f"strategy_concept_name_{_index}"] = str(
+                        _concept.get("name", "")
+                    ).strip()
+                    _terms = [
+                        str(term).strip()
+                        for term in (
+                            [_concept.get("primary_term", "")]
+                            + _concept.get("alternative_terms", [])
+                        )
+                        if str(term).strip()
+                    ]
+                    st.session_state[f"strategy_concept_terms_{_index}"] = "\n".join(_terms)
+                    st.session_state[f"strategy_concept_importance_{_index}"] = _concept.get(
+                        "importance", "important"
+                    )
+                    st.session_state[f"strategy_concept_operator_{_index}"] = "OR"
+
+                st.success(
+                    "Concepts approved. The active search strategy is ready; "
+                    "configure retrieval separately below. No search has run yet."
+                )
+
+        if st.session_state.get("ai_search_concepts_approved", False):
+            st.success(
+                "Approved strategy is ready for retrieval configuration. "
+                "Editing or regenerating a concept will require approval again."
+            )
+
+            if st.button(
+                "🔎 Run AI Patent Search & Review",
+                key="run_ai_patent_feedback_workflow",
+                type="primary",
+                disabled=True,
+            ):
+                invention = str(
+                    st.session_state.get("ai_invention_description", "")
+                ).strip()
+                approved_concepts = st.session_state.get(
+                    "ai_search_concepts", []
+                )
+
+                st.session_state.pop("ai_feedback_workflow_result", None)
+                st.session_state.pop("ai_feedback_workflow_error", None)
+
+                if not invention:
+                    st.session_state.ai_feedback_workflow_error = (
+                        "Please enter an invention description."
+                    )
+                elif not approved_concepts:
+                    st.session_state.ai_feedback_workflow_error = (
+                        "No approved search concepts were found."
+                    )
+                else:
+                    try:
+                        from models.claude_client import ClaudeClient
+                        from services.search_feedback_workflow import (
+                            run_patent_search_feedback_workflow,
+                        )
+
+                        with st.spinner(
+                            "Generating search queries, retrieving patents, "
+                            "ranking evidence, and reviewing results..."
+                        ):
+                            result = run_patent_search_feedback_workflow(
+                                invention=invention,
+                                approved_concepts=approved_concepts,
+                                client=ClaudeClient(),
+                                max_runs=3,
+                            )
+
+                        st.session_state.ai_feedback_workflow_result = result
+
+                    except Exception as exc:
+                        st.session_state.ai_feedback_workflow_error = str(exc)
+
+        if st.session_state.get("ai_feedback_workflow_error"):
+            st.error(
+                "The AI patent search workflow failed: "
+                + st.session_state.ai_feedback_workflow_error
+            )
+
+        if st.session_state.get("ai_feedback_workflow_result") is not None:
+            result = st.session_state.ai_feedback_workflow_result
+
+            usage = result.get("token_usage", {})
+
+            if usage:
+                st.markdown("#### Claude token usage")
+
+                metric_cols = st.columns(3)
+                metric_cols[0].metric(
+                    "Input tokens", f"{usage.get('input_tokens', 0):,}"
+                )
+                metric_cols[1].metric(
+                    "Output tokens", f"{usage.get('output_tokens', 0):,}"
+                )
+                metric_cols[2].metric(
+                    "Total tokens", f"{usage.get('total_tokens', 0):,}"
+                )
+
+                st.caption(
+                    f"Claude API calls: {usage.get('calls', 0)} · "
+                    "Includes successful calls and validation retries."
+                )
+
+                with st.expander("Token usage by stage"):
+                    stage_rows = [
+                        {"Stage": stage, **values}
+                        for stage, values in usage.get("by_stage", {}).items()
+                    ]
+                    if stage_rows:
+                        st.dataframe(stage_rows, hide_index=True, use_container_width=True)
+
+                with st.expander("Individual Claude API calls"):
+                    call_rows = [
+                        {
+                            "Stage": event["stage"],
+                            "Model": event["model"],
+                            "Input": event["input_tokens"],
+                            "Output": event["output_tokens"],
+                            "Total": event["total_tokens"],
+                        }
+                        for event in usage.get("events", [])
+                    ]
+                    if call_rows:
+                        st.dataframe(
+                            call_rows, hide_index=True, use_container_width=True
+                        )
+
+            st.markdown("### 📊 AI Patent Search & Review Results")
+
+            if "ai_feedback_expand_all" not in st.session_state:
+                st.session_state.ai_feedback_expand_all = False
+
+            control_col, status_col = st.columns([1, 3])
+
+            with control_col:
+                if st.button(
+                    (
+                        "⬆️ Collapse all"
+                        if st.session_state.ai_feedback_expand_all
+                        else "⬇️ Expand all"
+                    ),
+                    key="ai_feedback_toggle_all",
+                ):
+                    st.session_state.ai_feedback_expand_all = (
+                        not st.session_state.ai_feedback_expand_all
+                    )
+                    st.rerun()
+
+            with status_col:
+                st.caption(
+                    f"Runs: {result.get('run_count', 0)} / "
+                    f"{result.get('max_runs', 3)} · "
+                    f"Decision: {result.get('decision', 'unknown')} · "
+                    f"Stop reason: {result.get('stop_reason', 'unknown')}"
+                )
+
+            expanded = st.session_state.ai_feedback_expand_all
+            history = result.get("history", [])
+
+            for run in history:
+                run_number = run.get("run_number", "?")
+                plan = run.get("plan", {})
+                queries = plan.get("queries", [])
+                patents = run.get("results", [])
+                review = run.get("review", {})
+
+                with st.expander(
+                    f"Run {run_number} — "
+                    f"{len(queries)} queries · "
+                    f"{len(patents)} retrieved records · "
+                    f"{review.get('decision', 'not reviewed')}",
+                    expanded=expanded,
+                ):
+                    st.markdown("#### Search plan")
+
+                    for query in queries:
+                        with st.expander(
+                            query.get("name", "Unnamed query"),
+                            expanded=expanded,
+                        ):
+                            st.write(query.get("purpose", ""))
+                            st.json(query.get("groups", []), expanded=expanded)
+
+                    st.markdown("#### 🏆 Top 8 ranked candidates")
+
+                    ranked_candidates = review.get("ranked_candidates", [])
+
+                    if not ranked_candidates:
+                        st.info("No ranked candidates were retained for this run.")
+                    else:
+                        st.caption(
+                            f"{len(ranked_candidates)} candidates selected by the ranker. "
+                            "Scores indicate ranking relevance, not verified patent overlap."
+                        )
+
+                        for rank_position, patent in enumerate(ranked_candidates, start=1):
+                            patent_id = patent.get("patent_id", "Unknown ID")
+                            title = patent.get("title", "Untitled patent")
+
+                            with st.expander(
+                                f"#{rank_position} — {patent_id} — {title}",
+                                expanded=expanded,
+                            ):
+                                score_cols = st.columns(4)
+                                score_cols[0].metric(
+                                    "Hybrid",
+                                    f"{patent.get('hybrid_score', 0):.4f}",
+                                )
+                                score_cols[1].metric(
+                                    "Cosine",
+                                    f"{patent.get('cosine_score', 0):.4f}",
+                                )
+                                score_cols[2].metric(
+                                    "BM25",
+                                    f"{patent.get('bm25_score', 0):.4f}",
+                                )
+                                score_cols[3].metric(
+                                    "Coverage",
+                                    f"{patent.get('coverage', 0):.2f}",
+                                )
+
+                                st.write("**Abstract**")
+                                st.write(patent.get("abstract") or "Not available")
+
+                                st.write("**Claims**")
+                                st.write(patent.get("claims") or "Not available")
+
+                                if patent.get("search_queries"):
+                                    st.caption(
+                                        "Found by: " + ", ".join(patent["search_queries"])
+                                    )
+
+                    st.markdown("#### All retrieved patent records")
+                    if not patents:
+                        st.info(
+                            "No patent records were retrieved in this run. "
+                            "This does not establish that relevant prior art is absent."
+                        )
+                    else:
+                        for patent in patents:
+                            patent_id = patent.get("patent_id", "Unknown ID")
+                            title = patent.get("title", "Untitled patent")
+
+                            with st.expander(
+                                f"{patent_id} — {title}",
+                                expanded=expanded,
+                            ):
+                                st.write("**Abstract**")
+                                st.write(patent.get("abstract") or "Not available")
+
+                                st.write("**Claims**")
+                                st.write(patent.get("claims") or "Not available")
+
+                                if patent.get("search_queries"):
+                                    st.caption(
+                                        "Found by: "
+                                        + ", ".join(patent["search_queries"])
+                                    )
+
+                                for score in (
+                                    "cosine_score",
+                                    "bm25_score",
+                                    "hybrid_score",
+                                ):
+                                    if patent.get(score) is not None:
+                                        st.caption(
+                                            f"{score}: {patent[score]}"
+                                        )
+
+                    st.markdown("#### Review and coverage")
+
+                    st.write(
+                        review.get(
+                            "rationale",
+                            "No review rationale was recorded.",
+                        )
+                    )
+
+                    gaps = review.get("coverage_gaps", [])
+                    if gaps:
+                        st.write("**Coverage gaps**")
+                        for gap in gaps:
+                            st.markdown(f"- {gap}")
+
+                    revisions = review.get("queries_to_revise", [])
+                    if revisions:
+                        st.write("**Recommended query revisions**")
+                        st.json(revisions, expanded=expanded)
+
+                    patent_reviews = review.get("patent_reviews", [])
+                    if patent_reviews:
+                        st.markdown("**Evidence review by patent**")
+
+                        for patent_review in patent_reviews:
+                            with st.expander(
+                                (
+                                    f"{patent_review.get('patent_id', 'Unknown ID')} "
+                                    f"— {patent_review.get('label', 'unlabelled')}"
+                                ),
+                                expanded=expanded,
+                            ):
+                                st.write(patent_review.get("evidence", ""))
+
+                                evidence_excerpts = patent_review.get(
+                                    "evidence_excerpts", []
+                                )
+                                if evidence_excerpts:
+                                    st.markdown("**Source evidence excerpts**")
+                                    for excerpt in evidence_excerpts:
+                                        st.caption(
+                                            f"Source: {excerpt.get('source', 'unknown')}"
+                                        )
+                                        st.markdown(
+                                            f"> {excerpt.get('excerpt', '')}"
+                                        )
+                                        st.caption(
+                                            "Mechanism supported: "
+                                            f"{excerpt.get('supports', '')}"
+                                        )
+                                else:
+                                    st.warning(
+                                        "No verified source excerpts are available "
+                                        "for this patent review."
+                                    )
+
+                                st.write("**Matched mechanisms**")
+                                st.write(
+                                    patent_review.get("matched_mechanisms", [])
+                                )
+
+                                st.write("**Missing mechanisms**")
+                                st.write(
+                                    patent_review.get("missing_mechanisms", [])
+                                )
+
+            with st.expander("Raw workflow JSON", expanded=False):
+                st.json(result, expanded=False)
+
+    st.markdown("### 🧩 AI Invention Structure")
+
+    st.caption(
+        "Claude can decompose the invention into application, core system, "
+        "sensors, functions, and objects, then generate structured patent-search "
+        "paths. Review and edit the structure before generating search paths."
+    )
+
+    _invention_for_structure = st.session_state.get(
+        "ai_invention_description",
+        "",
+    ).strip()
+
+    if _invention_for_structure:
+        if st.button(
+            "🧩 Build Invention Search Structure",
+            key="build_ai_invention_structure",
+        ):
+            try:
+                with st.spinner(
+                    "Claude is building the invention search structure..."
+                ):
+                    _structure = generate_invention_structure(
+                        _invention_for_structure,
+                        ClaudeClient(),
+                    )
+
+                _debug_search_paths = _structure.get("search_paths", [])
+                if _debug_search_paths:
+                    st.write(
+                        "DEBUG SEARCH PATHS:",
+                        [path.get("name") for path in _debug_search_paths],
+                    )
+                    st.json(_debug_search_paths)
+
+                st.session_state.ai_invention_structure = _structure
+                logger.info(
+                    "AI INVENTION STRUCTURE:\n%s",
+                    json.dumps(_structure, indent=2, ensure_ascii=False),
+                )
+                st.session_state.ai_search_path_generation = (
+                    st.session_state.get("ai_search_path_generation", 0) + 1
+                )
+                st.session_state.ai_search_paths_approved = False
+
+            except Exception as exc:
+                st.error(
+                    f"Unable to build invention search structure: {exc}"
+                )
+
+    _structure = st.session_state.get(
+        "ai_invention_structure"
+    )
+
+    if _structure:
+        st.markdown("#### Review Invention Structure")
+
+        st.caption(
+            "Edit the suggested terminology as needed. "
+            "Regenerate the search paths after making changes."
         )
 
-    if st.session_state.get("ai_search_concepts_approved", False):
-        st.info(
-            "The reviewed concepts are approved. "
-            "You can now run the AI patent search and review."
+        _roles = [
+            ("Application", "application"),
+            ("Core System", "core_system"),
+            ("Sensors", "sensors"),
+            ("Functions", "functions"),
+            ("Objects", "objects"),
+        ]
+
+        _edited_structure = {}
+
+        _role_columns = st.columns(5)
+
+        for _column, (_label, _key) in zip(
+            _role_columns,
+            _roles,
+        ):
+            with _column:
+                st.markdown(f"**{_label}**")
+
+                _current_terms = _structure.get(
+                    _key,
+                    [],
+                )
+
+                _edited_text = st.text_area(
+                    _label,
+                    value="\n".join(_current_terms),
+                    key=f"ai_structure_edit_{_key}",
+                    height=220,
+                    label_visibility="collapsed",
+                )
+
+                _edited_structure[_key] = [
+                    _term.strip()
+                    for _term in _edited_text.splitlines()
+                    if _term.strip()
+                ]
+
+        st.session_state.ai_edited_invention_structure = (
+            _edited_structure
         )
 
         if st.button(
-            "🔎 Run AI Patent Search & Review",
-            key="run_ai_patent_feedback_workflow",
-            type="primary",
-            disabled=True,
+            "🔄 Regenerate Search Paths",
+            key="regenerate_ai_search_paths",
         ):
-            invention = str(
-                st.session_state.get("ai_invention_description", "")
-            ).strip()
-            approved_concepts = st.session_state.get(
-                "ai_search_concepts", []
+            _reviewed_structure = st.session_state.get(
+                "ai_edited_invention_structure",
+                {},
             )
 
-            st.session_state.pop("ai_feedback_workflow_result", None)
-            st.session_state.pop("ai_feedback_workflow_error", None)
-
-            if not invention:
-                st.session_state.ai_feedback_workflow_error = (
-                    "Please enter an invention description."
-                )
-            elif not approved_concepts:
-                st.session_state.ai_feedback_workflow_error = (
-                    "No approved search concepts were found."
-                )
-            else:
-                try:
-                    from models.claude_client import ClaudeClient
-                    from services.search_feedback_workflow import (
-                        run_patent_search_feedback_workflow,
-                    )
-
-                    with st.spinner(
-                        "Generating search queries, retrieving patents, "
-                        "ranking evidence, and reviewing results..."
-                    ):
-                        result = run_patent_search_feedback_workflow(
-                            invention=invention,
-                            approved_concepts=approved_concepts,
-                            client=ClaudeClient(),
-                            max_runs=3,
-                        )
-
-                    st.session_state.ai_feedback_workflow_result = result
-
-                except Exception as exc:
-                    st.session_state.ai_feedback_workflow_error = str(exc)
-
-    if st.session_state.get("ai_feedback_workflow_error"):
-        st.error(
-            "The AI patent search workflow failed: "
-            + st.session_state.ai_feedback_workflow_error
-        )
-
-    if st.session_state.get("ai_feedback_workflow_result") is not None:
-        result = st.session_state.ai_feedback_workflow_result
-
-        usage = result.get("token_usage", {})
-
-        if usage:
-            st.markdown("#### Claude token usage")
-
-            metric_cols = st.columns(3)
-            metric_cols[0].metric(
-                "Input tokens", f"{usage.get('input_tokens', 0):,}"
-            )
-            metric_cols[1].metric(
-                "Output tokens", f"{usage.get('output_tokens', 0):,}"
-            )
-            metric_cols[2].metric(
-                "Total tokens", f"{usage.get('total_tokens', 0):,}"
-            )
-
-            st.caption(
-                f"Claude API calls: {usage.get('calls', 0)} · "
-                "Includes successful calls and validation retries."
-            )
-
-            with st.expander("Token usage by stage"):
-                stage_rows = [
-                    {"Stage": stage, **values}
-                    for stage, values in usage.get("by_stage", {}).items()
-                ]
-                if stage_rows:
-                    st.dataframe(stage_rows, hide_index=True, use_container_width=True)
-
-            with st.expander("Individual Claude API calls"):
-                call_rows = [
-                    {
-                        "Stage": event["stage"],
-                        "Model": event["model"],
-                        "Input": event["input_tokens"],
-                        "Output": event["output_tokens"],
-                        "Total": event["total_tokens"],
-                    }
-                    for event in usage.get("events", [])
-                ]
-                if call_rows:
-                    st.dataframe(
-                        call_rows, hide_index=True, use_container_width=True
-                    )
-
-        st.markdown("### 📊 AI Patent Search & Review Results")
-
-        if "ai_feedback_expand_all" not in st.session_state:
-            st.session_state.ai_feedback_expand_all = False
-
-        control_col, status_col = st.columns([1, 3])
-
-        with control_col:
-            if st.button(
-                (
-                    "⬆️ Collapse all"
-                    if st.session_state.ai_feedback_expand_all
-                    else "⬇️ Expand all"
+            _updated_structure = {
+                "application": list(
+                    _reviewed_structure.get("application", [])
                 ),
-                key="ai_feedback_toggle_all",
-            ):
-                st.session_state.ai_feedback_expand_all = (
-                    not st.session_state.ai_feedback_expand_all
-                )
-                st.rerun()
+                "core_system": list(
+                    _reviewed_structure.get("core_system", [])
+                ),
+                "sensors": list(
+                    _reviewed_structure.get("sensors", [])
+                ),
+                "functions": list(
+                    _reviewed_structure.get("functions", [])
+                ),
+                "objects": list(
+                    _reviewed_structure.get("objects", [])
+                ),
+            }
 
-        with status_col:
-            st.caption(
-                f"Runs: {result.get('run_count', 0)} / "
-                f"{result.get('max_runs', 3)} · "
-                f"Decision: {result.get('decision', 'unknown')} · "
-                f"Stop reason: {result.get('stop_reason', 'unknown')}"
+            _updated_structure["search_paths"] = (
+                build_search_paths_from_structure(
+                    _updated_structure
+                )
             )
 
-        expanded = st.session_state.ai_feedback_expand_all
-        history = result.get("history", [])
-
-        for run in history:
-            run_number = run.get("run_number", "?")
-            plan = run.get("plan", {})
-            queries = plan.get("queries", [])
-            patents = run.get("results", [])
-            review = run.get("review", {})
-
-            with st.expander(
-                f"Run {run_number} — "
-                f"{len(queries)} queries · "
-                f"{len(patents)} retrieved records · "
-                f"{review.get('decision', 'not reviewed')}",
-                expanded=expanded,
-            ):
-                st.markdown("#### Search plan")
-
-                for query in queries:
-                    with st.expander(
-                        query.get("name", "Unnamed query"),
-                        expanded=expanded,
-                    ):
-                        st.write(query.get("purpose", ""))
-                        st.json(query.get("groups", []), expanded=expanded)
-
-                st.markdown("#### 🏆 Top 8 ranked candidates")
-
-                ranked_candidates = review.get("ranked_candidates", [])
-
-                if not ranked_candidates:
-                    st.info("No ranked candidates were retained for this run.")
-                else:
-                    st.caption(
-                        f"{len(ranked_candidates)} candidates selected by the ranker. "
-                        "Scores indicate ranking relevance, not verified patent overlap."
-                    )
-
-                    for rank_position, patent in enumerate(ranked_candidates, start=1):
-                        patent_id = patent.get("patent_id", "Unknown ID")
-                        title = patent.get("title", "Untitled patent")
-
-                        with st.expander(
-                            f"#{rank_position} — {patent_id} — {title}",
-                            expanded=expanded,
-                        ):
-                            score_cols = st.columns(4)
-                            score_cols[0].metric(
-                                "Hybrid",
-                                f"{patent.get('hybrid_score', 0):.4f}",
-                            )
-                            score_cols[1].metric(
-                                "Cosine",
-                                f"{patent.get('cosine_score', 0):.4f}",
-                            )
-                            score_cols[2].metric(
-                                "BM25",
-                                f"{patent.get('bm25_score', 0):.4f}",
-                            )
-                            score_cols[3].metric(
-                                "Coverage",
-                                f"{patent.get('coverage', 0):.2f}",
-                            )
-
-                            st.write("**Abstract**")
-                            st.write(patent.get("abstract") or "Not available")
-
-                            st.write("**Claims**")
-                            st.write(patent.get("claims") or "Not available")
-
-                            if patent.get("search_queries"):
-                                st.caption(
-                                    "Found by: " + ", ".join(patent["search_queries"])
-                                )
-
-                st.markdown("#### All retrieved patent records")
-                if not patents:
-                    st.info(
-                        "No patent records were retrieved in this run. "
-                        "This does not establish that relevant prior art is absent."
-                    )
-                else:
-                    for patent in patents:
-                        patent_id = patent.get("patent_id", "Unknown ID")
-                        title = patent.get("title", "Untitled patent")
-
-                        with st.expander(
-                            f"{patent_id} — {title}",
-                            expanded=expanded,
-                        ):
-                            st.write("**Abstract**")
-                            st.write(patent.get("abstract") or "Not available")
-
-                            st.write("**Claims**")
-                            st.write(patent.get("claims") or "Not available")
-
-                            if patent.get("search_queries"):
-                                st.caption(
-                                    "Found by: "
-                                    + ", ".join(patent["search_queries"])
-                                )
-
-                            for score in (
-                                "cosine_score",
-                                "bm25_score",
-                                "hybrid_score",
-                            ):
-                                if patent.get(score) is not None:
-                                    st.caption(
-                                        f"{score}: {patent[score]}"
-                                    )
-
-                st.markdown("#### Review and coverage")
-
-                st.write(
-                    review.get(
-                        "rationale",
-                        "No review rationale was recorded.",
-                    )
-                )
-
-                gaps = review.get("coverage_gaps", [])
-                if gaps:
-                    st.write("**Coverage gaps**")
-                    for gap in gaps:
-                        st.markdown(f"- {gap}")
-
-                revisions = review.get("queries_to_revise", [])
-                if revisions:
-                    st.write("**Recommended query revisions**")
-                    st.json(revisions, expanded=expanded)
-
-                patent_reviews = review.get("patent_reviews", [])
-                if patent_reviews:
-                    st.markdown("**Evidence review by patent**")
-
-                    for patent_review in patent_reviews:
-                        with st.expander(
-                            (
-                                f"{patent_review.get('patent_id', 'Unknown ID')} "
-                                f"— {patent_review.get('label', 'unlabelled')}"
-                            ),
-                            expanded=expanded,
-                        ):
-                            st.write(patent_review.get("evidence", ""))
-
-                            evidence_excerpts = patent_review.get(
-                                "evidence_excerpts", []
-                            )
-                            if evidence_excerpts:
-                                st.markdown("**Source evidence excerpts**")
-                                for excerpt in evidence_excerpts:
-                                    st.caption(
-                                        f"Source: {excerpt.get('source', 'unknown')}"
-                                    )
-                                    st.markdown(
-                                        f"> {excerpt.get('excerpt', '')}"
-                                    )
-                                    st.caption(
-                                        "Mechanism supported: "
-                                        f"{excerpt.get('supports', '')}"
-                                    )
-                            else:
-                                st.warning(
-                                    "No verified source excerpts are available "
-                                    "for this patent review."
-                                )
-
-                            st.write("**Matched mechanisms**")
-                            st.write(
-                                patent_review.get("matched_mechanisms", [])
-                            )
-
-                            st.write("**Missing mechanisms**")
-                            st.write(
-                                patent_review.get("missing_mechanisms", [])
-                            )
-
-        with st.expander("Raw workflow JSON", expanded=False):
-            st.json(result, expanded=False)
-
-st.markdown("### 🧩 AI Invention Structure")
-
-st.caption(
-    "Claude can decompose the invention into application, core system, "
-    "sensors, functions, and objects, then generate structured patent-search "
-    "paths. Review and edit the structure before generating search paths."
-)
-
-_invention_for_structure = st.session_state.get(
-    "ai_invention_description",
-    "",
-).strip()
-
-if _invention_for_structure:
-    if st.button(
-        "🧩 Build Invention Search Structure",
-        key="build_ai_invention_structure",
-    ):
-        try:
-            with st.spinner(
-                "Claude is building the invention search structure..."
-            ):
-                _structure = generate_invention_structure(
-                    _invention_for_structure,
-                    ClaudeClient(),
-                )
-
-            _debug_search_paths = _structure.get("search_paths", [])
-            if _debug_search_paths:
-                st.write(
-                    "DEBUG SEARCH PATHS:",
-                    [path.get("name") for path in _debug_search_paths],
-                )
-                st.json(_debug_search_paths)
-
-            st.session_state.ai_invention_structure = _structure
             logger.info(
-                "AI INVENTION STRUCTURE:\n%s",
-                json.dumps(_structure, indent=2, ensure_ascii=False),
+                "GENERATED SEARCH PATHS:\n%s",
+                json.dumps(
+                    _updated_structure["search_paths"],
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+            )
+
+            st.session_state.ai_invention_structure = (
+                _updated_structure
             )
             st.session_state.ai_search_path_generation = (
                 st.session_state.get("ai_search_path_generation", 0) + 1
             )
-            st.session_state.ai_search_paths_approved = False
 
-        except Exception as exc:
-            st.error(
-                f"Unable to build invention search structure: {exc}"
-            )
-
-_structure = st.session_state.get(
-    "ai_invention_structure"
-)
-
-if _structure:
-    st.markdown("#### Review Invention Structure")
-
-    st.caption(
-        "Edit the suggested terminology as needed. "
-        "Regenerate the search paths after making changes."
-    )
-
-    _roles = [
-        ("Application", "application"),
-        ("Core System", "core_system"),
-        ("Sensors", "sensors"),
-        ("Functions", "functions"),
-        ("Objects", "objects"),
-    ]
-
-    _edited_structure = {}
-
-    _role_columns = st.columns(5)
-
-    for _column, (_label, _key) in zip(
-        _role_columns,
-        _roles,
-    ):
-        with _column:
-            st.markdown(f"**{_label}**")
-
-            _current_terms = _structure.get(
-                _key,
-                [],
-            )
-
-            _edited_text = st.text_area(
-                _label,
-                value="\n".join(_current_terms),
-                key=f"ai_structure_edit_{_key}",
-                height=220,
-                label_visibility="collapsed",
-            )
-
-            _edited_structure[_key] = [
-                _term.strip()
-                for _term in _edited_text.splitlines()
-                if _term.strip()
-            ]
-
-    st.session_state.ai_edited_invention_structure = (
-        _edited_structure
-    )
-
-    if st.button(
-        "🔄 Regenerate Search Paths",
-        key="regenerate_ai_search_paths",
-    ):
-        _reviewed_structure = st.session_state.get(
-            "ai_edited_invention_structure",
-            {},
-        )
-
-        _updated_structure = {
-            "application": list(
-                _reviewed_structure.get("application", [])
-            ),
-            "core_system": list(
-                _reviewed_structure.get("core_system", [])
-            ),
-            "sensors": list(
-                _reviewed_structure.get("sensors", [])
-            ),
-            "functions": list(
-                _reviewed_structure.get("functions", [])
-            ),
-            "objects": list(
-                _reviewed_structure.get("objects", [])
-            ),
-        }
-
-        _updated_structure["search_paths"] = (
-            build_search_paths_from_structure(
+            st.session_state.ai_edited_invention_structure = (
                 _updated_structure
             )
+
+            st.session_state.ai_search_paths_approved = False
+            st.session_state.ai_approved_search_paths = []
+
+            for _index in range(6):
+                st.session_state.pop(
+                    f"ai_search_path_expression_{_index}",
+                    None,
+                )
+                st.session_state.pop(
+                    f"ai_search_path_selected_{_index}",
+                    None,
+                )
+
+            st.rerun()
+
+        with st.expander("Debug: Generated Search Paths"):
+            st.json(_structure.get("search_paths", []))
+
+        st.markdown("#### Generated Search Paths")
+
+        st.caption(
+            "Select the search paths you want to review. "
+            "You can also edit the Boolean expression before approval."
         )
 
-        logger.info(
-            "GENERATED SEARCH PATHS:\n%s",
-            json.dumps(
-                _updated_structure["search_paths"],
-                indent=2,
-                ensure_ascii=False,
-            ),
+        _paths = _structure.get(
+            "search_paths",
+            [],
         )
 
-        st.session_state.ai_invention_structure = (
-            _updated_structure
-        )
-        st.session_state.ai_search_path_generation = (
-            st.session_state.get("ai_search_path_generation", 0) + 1
-        )
+        _selected_search_paths = []
 
-        st.session_state.ai_edited_invention_structure = (
-            _updated_structure
-        )
+        for _index, _path in enumerate(_paths):
+            _path_name = str(
+                _path.get("name", "")
+            ).strip()
 
-        st.session_state.ai_search_paths_approved = False
-        st.session_state.ai_approved_search_paths = []
+            if not _path_name:
+                continue
 
-        for _index in range(6):
-            st.session_state.pop(
-                f"ai_search_path_expression_{_index}",
-                None,
-            )
-            st.session_state.pop(
-                f"ai_search_path_selected_{_index}",
-                None,
-            )
+            _expression = str(
+                _path.get("expression", "")
+            ).strip()
 
-        st.rerun()
+            _purpose = str(
+                _path.get("purpose", "")
+            ).strip()
 
-    with st.expander("Debug: Generated Search Paths"):
-        st.json(_structure.get("search_paths", []))
-
-    st.markdown("#### Generated Search Paths")
-
-    st.caption(
-        "Select the search paths you want to review. "
-        "You can also edit the Boolean expression before approval."
-    )
-
-    _paths = _structure.get(
-        "search_paths",
-        [],
-    )
-
-    _selected_search_paths = []
-
-    for _index, _path in enumerate(_paths):
-        _path_name = str(
-            _path.get("name", "")
-        ).strip()
-
-        if not _path_name:
-            continue
-
-        _expression = str(
-            _path.get("expression", "")
-        ).strip()
-
-        _purpose = str(
-            _path.get("purpose", "")
-        ).strip()
-
-        _selected = st.checkbox(
-            _path_name,
-            key=f"ai_search_path_selected_{_index}",
-        )
-
-        if _selected:
-            _selected_search_paths.append(
-                _index
+            _selected = st.checkbox(
+                _path_name,
+                key=f"ai_search_path_selected_{_index}",
             )
 
-        if _purpose:
-            st.caption(_purpose)
+            if _selected:
+                _selected_search_paths.append(
+                    _index
+                )
 
-        st.text_area(
-            f"Search expression — {_path_name}",
-            value=_expression,
-            key=(
-                f"ai_search_path_expression_"
-                f"{st.session_state.get('ai_search_path_generation', 0)}_"
-                f"{_index}"
-            ),
-            height=90,
-        )
+            if _purpose:
+                st.caption(_purpose)
 
-        st.divider()
+            st.text_area(
+                f"Search expression — {_path_name}",
+                value=_expression,
+                key=(
+                    f"ai_search_path_expression_"
+                    f"{st.session_state.get('ai_search_path_generation', 0)}_"
+                    f"{_index}"
+                ),
+                height=90,
+            )
 
-    if _selected_search_paths:
-        st.markdown(
-            f"**{len(_selected_search_paths)} search path(s) selected**"
-        )
-    else:
-        st.info(
-            "Select at least one search path to approve it."
-        )
+            st.divider()
 
-    if st.button(
-        "✅ Approve Selected Search Paths",
-        key="approve_ai_search_paths",
-        disabled=not _selected_search_paths,
-    ):
-        _approved_paths = []
+        if _selected_search_paths:
+            st.markdown(
+                f"**{len(_selected_search_paths)} search path(s) selected**"
+            )
+        else:
+            st.info(
+                "Select at least one search path to approve it."
+            )
 
-        for _index in _selected_search_paths:
-            _path = _paths[_index]
+        if st.button(
+            "✅ Approve Selected Search Paths",
+            key="approve_ai_search_paths",
+            disabled=not _selected_search_paths,
+        ):
+            _approved_paths = []
 
-            _approved_paths.append(
-                {
-                    "name": str(
-                        _path.get("name", "")
-                    ).strip(),
-                    "roles": list(
-                        _path.get("roles", [])
-                    ),
-                    "expression": st.session_state.get(
-                        (
-                            f"ai_search_path_expression_"
-                            f"{st.session_state.get('ai_search_path_generation', 0)}_"
-                            f"{_index}"
+            for _index in _selected_search_paths:
+                _path = _paths[_index]
+
+                _approved_paths.append(
+                    {
+                        "name": str(
+                            _path.get("name", "")
+                        ).strip(),
+                        "roles": list(
+                            _path.get("roles", [])
                         ),
-                        "",
-                    ).strip(),
-                    "purpose": str(
-                        _path.get("purpose", "")
-                    ).strip(),
-                    # Search-quality metadata
-                    "quality_level": str(
-                        _path.get(
+                        "expression": st.session_state.get(
+                            (
+                                f"ai_search_path_expression_"
+                                f"{st.session_state.get('ai_search_path_generation', 0)}_"
+                                f"{_index}"
+                            ),
+                            "",
+                        ).strip(),
+                        "purpose": str(
+                            _path.get("purpose", "")
+                        ).strip(),
+                        # Search-quality metadata
+                        "quality_level": str(
+                            _path.get(
+                                "quality_level",
+                                "balanced",
+                            )
+                        ).strip(),
+                        "recall_priority": int(
+                            _path.get(
+                                "recall_priority",
+                                0,
+                            )
+                        ),
+                        "precision_priority": int(
+                            _path.get(
+                                "precision_priority",
+                                0,
+                            )
+                        ),
+                    }
+                )
+
+            st.session_state.ai_approved_search_paths = (
+                _approved_paths
+            )
+
+            st.session_state.ai_search_paths_approved = True
+
+            st.success(
+                f"{len(_approved_paths)} search path(s) approved "
+                "for the next search stage."
+            )
+
+        if st.session_state.get(
+            "ai_search_paths_approved",
+            False,
+        ):
+            st.markdown("#### Approved Search Paths")
+
+            for _path in st.session_state.get(
+                "ai_approved_search_paths",
+                [],
+            ):
+                st.markdown(
+                    f"**{_path['name']}**"
+                )
+
+                st.code(
+                    _path["expression"],
+                    language="text",
+                )
+
+        if _structure:
+            with st.expander("Debug: AI Invention Structure"):
+                st.json(_structure)
+
+    with st.expander("Retrieval Configuration", expanded=True):
+        st.caption(
+            "Choose the retrieval breadth separately from concept editing and approval. "
+            "This setting affects query generation, not the approved concept definitions."
+        )
+        _retrieval_mode = st.radio(
+            "How should critical concepts be searched?",
+            options=["Broad", "Balanced", "Strict"],
+            index=0,
+            format_func=lambda mode: {
+                "Broad": "Broad — search each critical concept independently",
+                "Balanced": "Balanced — individual searches + concept pairs",
+                "Strict": "Strict — require all critical concepts",
+            }[mode],
+            help=(
+                "Broad maximizes discovery. Balanced also searches pairs of "
+                "critical concepts. Strict requires all critical concepts "
+                "in one Boolean query."
+            ),
+            key="strategy_retrieval_mode",
+        )
+
+    with st.expander("Manual Search Strategy Editor (optional)", expanded=False):
+
+        st.markdown("### Key Inventive Points")
+
+        _kip_text = st.text_area(
+            "Enter the key inventive points, one per line",
+            value="\n".join(
+                st.session_state.search_strategy.key_inventive_points
+                if st.session_state.search_strategy
+                else []
+            ),
+            height=100,
+            key="strategy_kip",
+            placeholder=(
+                "Example:\n"
+                "rechargeable battery\n"
+                "charging circuit"
+            ),
+        )
+
+        st.markdown("### Concepts")
+
+        if "strategy_concept_count" not in st.session_state:
+            st.session_state["strategy_concept_count"] = 3
+
+        _concept_count = st.number_input(
+            "Number of concepts",
+            min_value=1,
+            max_value=15,
+            step=1,
+            key="strategy_concept_count",
+        )
+
+        _concepts = []
+
+        for _i in range(_concept_count):
+            st.markdown(f"#### Concept {_i + 1}")
+
+            _c1, _c2 = st.columns([3, 1])
+
+            with _c1:
+                _name = st.text_input(
+                    "Concept name",
+                    key=f"strategy_concept_name_{_i}",
+                    placeholder="e.g. Lane Detection",
+                )
+
+            with _c2:
+                _importance = st.selectbox(
+                    "Importance",
+                    ["critical", "important", "supporting"],
+                    key=f"strategy_concept_importance_{_i}",
+                )
+
+            _terms_raw = st.text_area(
+                "Alternative / similar patent terms — one per line",
+                key=f"strategy_concept_terms_{_i}",
+                height=100,
+                placeholder=(
+                    "lane detection\n"
+                    "lane recognition\n"
+                    "lane boundary detection"
+                ),
+            )
+            st.caption(
+                "Enter one search term per line. Wildcards such as comput$ "
+                "can be entered directly."
+            )
+
+            _operator = st.selectbox(
+                "Operator within this concept",
+                ["OR", "AND"],
+                key=f"strategy_concept_operator_{_i}",
+            )
+
+            _terms = [
+                term.strip()
+                for term in _terms_raw.splitlines()
+                if term.strip()
+            ]
+
+            # Append explicit variants while preserving the reviewed terms.
+            _terms = add_terminology_variants(_name.strip(), _terms)
+
+            if _name.strip() or _terms:
+                _concepts.append(
+                    SearchConcept(
+                        name=_name.strip(),
+                        importance=_importance,
+                        terms=_terms,
+                        operator=_operator,
+                    )
+                )
+
+        st.markdown("### Relationship Between Concepts")
+
+        _concept_operator = st.selectbox(
+            "Combine concept groups with",
+            ["AND", "OR"],
+            key="strategy_concept_operator",
+        )
+
+        st.markdown("### Search Fields")
+
+        _f1, _f2, _f3 = st.columns(3)
+
+        with _f1:
+            _use_title = st.checkbox("Title", value=True, key="strategy_field_title")
+
+        with _f2:
+            _use_abstract = st.checkbox(
+                "Abstract",
+                value=True,
+                key="strategy_field_abstract",
+            )
+
+        with _f3:
+            _use_claims = st.checkbox(
+                "Claims",
+                value=True,
+                key="strategy_field_claims",
+            )
+
+        _search_fields = []
+
+        if _use_title:
+            _search_fields.append("title")
+
+        if _use_abstract:
+            _search_fields.append("abstract")
+
+        if _use_claims:
+            _search_fields.append("claims")
+
+        if st.button(
+            "💾 Build Search Strategy",
+            type="primary",
+            width="stretch",
+            key="build_search_strategy",
+        ):
+            _key_points = [
+                line.strip()
+                for line in _kip_text.splitlines()
+                if line.strip()
+            ]
+
+            st.session_state.search_strategy = SearchStrategy(
+                original_input=query,
+                key_inventive_points=_key_points,
+                concepts=_concepts,
+                concept_operator=_concept_operator,
+                search_fields=_search_fields,
+            )
+
+            st.session_state.search_strategy_approved = False
+            st.session_state.ai_search_concepts_approved = False
+
+        if st.session_state.search_strategy:
+
+            st.divider()
+            st.markdown("### 2. Retrieval Configuration & Query Preview")
+            st.caption(
+                "Choose which approved strategy to retrieve with, inspect the planned queries, "
+                "and then run retrieval from the pipeline controls below. Previewing does not search."
+            )
+
+            if "active_search_strategy_source" not in st.session_state:
+                st.session_state.active_search_strategy_source = "concepts"
+
+            strategy_source = st.radio(
+                "Search Strategy Source",
+                options=["concepts", "invention_structure"],
+                format_func=lambda value: {
+                    "concepts": "AI-Assisted Search Concepts",
+                    "invention_structure": "AI Invention Structure",
+                }[value],
+                horizontal=True,
+                key="active_search_strategy_source",
+            )
+
+            if strategy_source == "concepts":
+                st.markdown("### Current Search Strategy")
+
+                # ── AI-Assisted Search Concepts ───────────────────────────────
+                _strategy = st.session_state.search_strategy
+
+                if not st.session_state.get("search_strategy_approved", False):
+                    st.warning(
+                        "This strategy is not currently approved. Review it and approve it before retrieval."
+                    )
+
+                st.write(
+                    f"**Original input:** {_strategy.original_input}"
+                )
+
+                if _strategy.key_inventive_points:
+                    st.write("**Key inventive points:**")
+                    for _point in _strategy.key_inventive_points:
+                        st.write(f"- {_point}")
+
+                for _i, _concept in enumerate(_strategy.concepts, 1):
+                    st.markdown(
+                        f"**Concept {_i}: {_concept.name}** "
+                        f"({_concept.importance})"
+                    )
+
+                    if _concept.terms:
+                        st.write(
+                            f"{' ' + _concept.operator + ' '.join([])}".strip()
+                            if False
+                            else f"Terms ({_concept.operator}): "
+                            + " · ".join(_concept.terms)
+                        )
+
+                st.write(
+                    f"**Between concepts:** {_strategy.concept_operator}"
+                )
+
+                st.write(
+                    f"**Search fields:** "
+                    f"{', '.join(_strategy.search_fields) if _strategy.search_fields else 'None'}"
+                )
+
+                _boolean_search = build_boolean_search(_strategy)
+
+                if _boolean_search:
+                    st.markdown("### Generated Boolean Search")
+                    st.code(_boolean_search, language="text")
+
+                from services.search_strategy_service import (
+                    build_search_queries,
+                    build_core_pair_queries,
+                )
+
+                _critical_count = sum(
+                    1
+                    for concept in _strategy.concepts
+                    if concept.importance.lower() == "critical"
+                    and any(term.strip() for term in concept.terms)
+                )
+
+                _individual_queries = build_search_queries(_strategy)
+                _pair_queries = build_core_pair_queries(_strategy)
+
+                if _critical_count >= 2:
+                    _strict_query = build_boolean_search(_strategy)
+                else:
+                    _strict_query = ""
+
+                if _retrieval_mode == "Broad":
+                    _preview_queries = _individual_queries
+                elif _retrieval_mode == "Balanced":
+                    _preview_queries = _individual_queries + _pair_queries
+                else:
+                    _preview_queries = (
+                        [_strict_query] if _strict_query else []
+                    )
+
+                # Remove duplicate expressions while preserving query order.
+                _preview_queries = list(dict.fromkeys(_preview_queries))
+
+                st.markdown("### Retrieval Query Preview")
+                st.caption(
+                    "Preview only: these queries have not yet been executed."
+                )
+
+                st.metric("Queries planned", len(_preview_queries))
+
+                if not _preview_queries:
+                    st.warning(
+                        "No queries can be generated. Add at least one "
+                        "critical concept with a non-empty search term."
+                    )
+                else:
+                    for _query_index, _query_text in enumerate(
+                        _preview_queries, start=1
+                    ):
+                        st.markdown(f"**Query {_query_index}**")
+                        st.code(_query_text, language="text")
+
+                _uspto_strings = build_uspto_search_strings(_strategy)
+
+                if _uspto_strings:
+                    st.markdown("### 🇺🇸 USPTO Search Strings")
+
+                    for _field, _expression in _uspto_strings.items():
+                        st.markdown(f"**{_field.title()}**")
+                        st.code(_expression, language="text")
+
+                if not st.session_state.get("ai_search_concepts_approved", False):
+                    if st.button(
+                        "✅ Approve Manually Built Search Strategy",
+                        width="stretch",
+                        key="approve_search_strategy",
+                    ):
+                        st.session_state.search_strategy_approved = True
+                else:
+                    st.caption("Approval is complete. Change concepts in the editor above to revise the strategy.")
+
+            else:
+
+                # ── AI Invention Structure ────────────────────────────────────
+                st.markdown("### Approved Search Paths")
+                st.markdown("**Source: AI Invention Structure**")
+
+                if st.session_state.get(
+                    "ai_search_paths_approved",
+                    False,
+                ):
+                    _approved_paths = st.session_state.get(
+                        "ai_approved_search_paths",
+                        [],
+                    )
+
+                    st.markdown(
+                        f"**Approved Search Paths: {len(_approved_paths)}**"
+                    )
+
+                    for _path in _approved_paths:
+                        st.markdown(
+                            f"**{_path['name']}**"
+                        )
+
+                        _quality = _path.get(
                             "quality_level",
                             "balanced",
                         )
-                    ).strip(),
-                    "recall_priority": int(
-                        _path.get(
-                            "recall_priority",
-                            0,
+
+                        _quality_label = {
+                            "broad": "🟢 Broad / High Recall",
+                            "balanced": "🟡 Balanced",
+                            "focused": "🔴 Focused / High Precision",
+                        }.get(
+                            _quality,
+                            "🟡 Balanced",
                         )
-                    ),
-                    "precision_priority": int(
-                        _path.get(
-                            "precision_priority",
-                            0,
-                        )
-                    ),
-                }
-            )
 
-        st.session_state.ai_approved_search_paths = (
-            _approved_paths
-        )
-
-        st.session_state.ai_search_paths_approved = True
-
-        st.success(
-            f"{len(_approved_paths)} search path(s) approved "
-            "for the next search stage."
-        )
-
-    if st.session_state.get(
-        "ai_search_paths_approved",
-        False,
-    ):
-        st.markdown("#### Approved Search Paths")
-
-        for _path in st.session_state.get(
-            "ai_approved_search_paths",
-            [],
-        ):
-            st.markdown(
-                f"**{_path['name']}**"
-            )
-
-            st.code(
-                _path["expression"],
-                language="text",
-            )
-
-    if _structure:
-        with st.expander("Debug: AI Invention Structure"):
-            st.json(_structure)
-
-with st.expander("Build Search Strategy", expanded=True):
-
-    st.markdown("### Key Inventive Points")
-
-    _kip_text = st.text_area(
-        "Enter the key inventive points, one per line",
-        value="\n".join(
-            st.session_state.search_strategy.key_inventive_points
-            if st.session_state.search_strategy
-            else []
-        ),
-        height=100,
-        key="strategy_kip",
-        placeholder=(
-            "Example:\n"
-            "rechargeable battery\n"
-            "charging circuit"
-        ),
-    )
-
-    st.markdown("### Concepts")
-
-    _concept_count = st.number_input(
-        "Number of concepts",
-        min_value=1,
-        max_value=15,
-        value=3,
-        step=1,
-        key="strategy_concept_count",
-    )
-
-    _concepts = []
-
-    for _i in range(_concept_count):
-        st.markdown(f"#### Concept {_i + 1}")
-
-        _c1, _c2 = st.columns([3, 1])
-
-        with _c1:
-            _name = st.text_input(
-                "Concept name",
-                key=f"strategy_concept_name_{_i}",
-                placeholder="e.g. Lane Detection",
-            )
-
-        with _c2:
-            _importance = st.selectbox(
-                "Importance",
-                ["critical", "important", "supporting"],
-                key=f"strategy_concept_importance_{_i}",
-            )
-
-        _terms_raw = st.text_area(
-            "Alternative / similar patent terms — one per line",
-            key=f"strategy_concept_terms_{_i}",
-            height=100,
-            placeholder=(
-                "lane detection\n"
-                "lane recognition\n"
-                "lane boundary detection"
-            ),
-        )
-        st.caption(
-            "Enter one search term per line. Wildcards such as comput$ "
-            "can be entered directly."
-        )
-
-        _operator = st.selectbox(
-            "Operator within this concept",
-            ["OR", "AND"],
-            key=f"strategy_concept_operator_{_i}",
-        )
-
-        _terms = [
-            term.strip()
-            for term in _terms_raw.splitlines()
-            if term.strip()
-        ]
-
-        # Append explicit variants while preserving the reviewed terms.
-        _terms = add_terminology_variants(_name.strip(), _terms)
-
-        if _name.strip() or _terms:
-            _concepts.append(
-                SearchConcept(
-                    name=_name.strip(),
-                    importance=_importance,
-                    terms=_terms,
-                    operator=_operator,
-                )
-            )
-
-    st.markdown("### Retrieval Strategy")
-
-    _retrieval_mode = st.radio(
-        "How should critical concepts be searched?",
-        options=["Broad", "Balanced", "Strict"],
-        index=0,
-        format_func=lambda mode: {
-            "Broad": "Broad — search each critical concept independently",
-            "Balanced": "Balanced — individual searches + concept pairs",
-            "Strict": "Strict — require all critical concepts",
-        }[mode],
-        help=(
-            "Broad maximizes discovery. Balanced also searches pairs of "
-            "critical concepts. Strict requires all critical concepts "
-            "in one Boolean query."
-        ),
-        key="strategy_retrieval_mode",
-    )
-
-    st.markdown("### Relationship Between Concepts")
-
-    _concept_operator = st.selectbox(
-        "Combine concept groups with",
-        ["AND", "OR"],
-        key="strategy_concept_operator",
-    )
-
-    st.markdown("### Search Fields")
-
-    _f1, _f2, _f3 = st.columns(3)
-
-    with _f1:
-        _use_title = st.checkbox("Title", value=True, key="strategy_field_title")
-
-    with _f2:
-        _use_abstract = st.checkbox(
-            "Abstract",
-            value=True,
-            key="strategy_field_abstract",
-        )
-
-    with _f3:
-        _use_claims = st.checkbox(
-            "Claims",
-            value=True,
-            key="strategy_field_claims",
-        )
-
-    _search_fields = []
-
-    if _use_title:
-        _search_fields.append("title")
-
-    if _use_abstract:
-        _search_fields.append("abstract")
-
-    if _use_claims:
-        _search_fields.append("claims")
-
-    if st.button(
-        "💾 Build Search Strategy",
-        type="primary",
-        width="stretch",
-        key="build_search_strategy",
-    ):
-        _key_points = [
-            line.strip()
-            for line in _kip_text.splitlines()
-            if line.strip()
-        ]
-
-        st.session_state.search_strategy = SearchStrategy(
-            original_input=query,
-            key_inventive_points=_key_points,
-            concepts=_concepts,
-            concept_operator=_concept_operator,
-            search_fields=_search_fields,
-        )
-
-        st.session_state.search_strategy_approved = False
-
-    if st.session_state.search_strategy:
-
-        st.divider()
-        st.markdown("# ── Active Search Strategy ────────────────────────────────────────────────")
-
-        if "active_search_strategy_source" not in st.session_state:
-            st.session_state.active_search_strategy_source = "concepts"
-
-        strategy_source = st.radio(
-            "Search Strategy Source",
-            options=["concepts", "invention_structure"],
-            format_func=lambda value: {
-                "concepts": "AI-Assisted Search Concepts",
-                "invention_structure": "AI Invention Structure",
-            }[value],
-            horizontal=True,
-            key="active_search_strategy_source",
-        )
-
-        if strategy_source == "concepts":
-            st.markdown("### Current Search Strategy")
-
-            # ── AI-Assisted Search Concepts ───────────────────────────────
-            _strategy = st.session_state.search_strategy
-
-            st.write(
-                f"**Original input:** {_strategy.original_input}"
-            )
-
-            if _strategy.key_inventive_points:
-                st.write("**Key inventive points:**")
-                for _point in _strategy.key_inventive_points:
-                    st.write(f"- {_point}")
-
-            for _i, _concept in enumerate(_strategy.concepts, 1):
-                st.markdown(
-                    f"**Concept {_i}: {_concept.name}** "
-                    f"({_concept.importance})"
-                )
-
-                if _concept.terms:
-                    st.write(
-                        f"{' ' + _concept.operator + ' '.join([])}".strip()
-                        if False
-                        else f"Terms ({_concept.operator}): "
-                        + " · ".join(_concept.terms)
-                    )
-
-            st.write(
-                f"**Between concepts:** {_strategy.concept_operator}"
-            )
-
-            st.write(
-                f"**Search fields:** "
-                f"{', '.join(_strategy.search_fields) if _strategy.search_fields else 'None'}"
-            )
-
-            _boolean_search = build_boolean_search(_strategy)
-
-            if _boolean_search:
-                st.markdown("### Generated Boolean Search")
-                st.code(_boolean_search, language="text")
-
-            from services.search_strategy_service import (
-                build_search_queries,
-                build_core_pair_queries,
-            )
-
-            _critical_count = sum(
-                1
-                for concept in _strategy.concepts
-                if concept.importance.lower() == "critical"
-                and any(term.strip() for term in concept.terms)
-            )
-
-            _individual_queries = build_search_queries(_strategy)
-            _pair_queries = build_core_pair_queries(_strategy)
-
-            if _critical_count >= 2:
-                _strict_query = build_boolean_search(_strategy)
-            else:
-                _strict_query = ""
-
-            if _retrieval_mode == "Broad":
-                _preview_queries = _individual_queries
-            elif _retrieval_mode == "Balanced":
-                _preview_queries = _individual_queries + _pair_queries
-            else:
-                _preview_queries = (
-                    [_strict_query] if _strict_query else []
-                )
-
-            # Remove duplicate expressions while preserving query order.
-            _preview_queries = list(dict.fromkeys(_preview_queries))
-
-            st.markdown("### Retrieval Query Preview")
-            st.caption(
-                "Preview only: these queries have not yet been executed."
-            )
-
-            st.metric("Queries planned", len(_preview_queries))
-
-            if not _preview_queries:
-                st.warning(
-                    "No queries can be generated. Add at least one "
-                    "critical concept with a non-empty search term."
-                )
-            else:
-                for _query_index, _query_text in enumerate(
-                    _preview_queries, start=1
-                ):
-                    st.markdown(f"**Query {_query_index}**")
-                    st.code(_query_text, language="text")
-
-            _uspto_strings = build_uspto_search_strings(_strategy)
-
-            if _uspto_strings:
-                st.markdown("### 🇺🇸 USPTO Search Strings")
-
-                for _field, _expression in _uspto_strings.items():
-                    st.markdown(f"**{_field.title()}**")
-                    st.code(_expression, language="text")
-
-            if st.button(
-                "✅ Approve Search Strategy",
-                width="stretch",
-                key="approve_search_strategy",
-            ):
-                st.session_state.search_strategy_approved = True
-
-        else:
-
-            # ── AI Invention Structure ────────────────────────────────────
-            st.markdown("### Approved Search Paths")
-            st.markdown("**Source: AI Invention Structure**")
-
-            if st.session_state.get(
-                "ai_search_paths_approved",
-                False,
-            ):
-                _approved_paths = st.session_state.get(
-                    "ai_approved_search_paths",
-                    [],
-                )
-
-                st.markdown(
-                    f"**Approved Search Paths: {len(_approved_paths)}**"
-                )
-
-                for _path in _approved_paths:
-                    st.markdown(
-                        f"**{_path['name']}**"
-                    )
-
-                    _quality = _path.get(
-                        "quality_level",
-                        "balanced",
-                    )
-
-                    _quality_label = {
-                        "broad": "🟢 Broad / High Recall",
-                        "balanced": "🟡 Balanced",
-                        "focused": "🔴 Focused / High Precision",
-                    }.get(
-                        _quality,
-                        "🟡 Balanced",
-                    )
-
-                    st.caption(
-                        f"{_quality_label}"
-                    )
-
-                    if _path.get("purpose"):
                         st.caption(
-                            _path["purpose"]
+                            f"{_quality_label}"
                         )
 
-                    col1, col2 = st.columns(2)
+                        if _path.get("purpose"):
+                            st.caption(
+                                _path["purpose"]
+                            )
+
+                        col1, col2 = st.columns(2)
+
+                        with col1:
+                            st.metric(
+                                "Recall priority",
+                                _path.get("recall_priority", 0),
+                            )
+
+                        with col2:
+                            st.metric(
+                                "Precision priority",
+                                _path.get("precision_priority", 0),
+                            )
+
+                        st.code(
+                            _path.get("expression", ""),
+                            language="text",
+                        )
+
+                else:
+                    st.info(
+                        "No AI Invention Structure search paths have "
+                        "been approved yet."
+                    )
+
+            # ── Proximity Rules ────────────────────────────────────
+
+            st.markdown("### Proximity Rules")
+            st.caption(
+                "Define relationships between search terms. "
+                "Distance applies to ADJ and NEAR."
+            )
+
+            all_strategy_terms = []
+
+            for concept in st.session_state.search_strategy.concepts:
+                for term in concept.terms:
+                    term = term.strip()
+                    if term and term not in all_strategy_terms:
+                        all_strategy_terms.append(term)
+
+            if all_strategy_terms:
+                proximity_count = st.number_input(
+                    "Number of proximity rules",
+                    min_value=0,
+                    max_value=10,
+                    value=len(st.session_state.search_strategy.proximity_rules),
+                    step=1,
+                    key="proximity_rule_count",
+                )
+
+                proximity_rules = []
+
+                for i in range(proximity_count):
+                    st.markdown(f"**Proximity Rule {i + 1}**")
+
+                    col1, col2, col3 = st.columns(3)
+
+                    existing_rule = (
+                        st.session_state.search_strategy.proximity_rules[i]
+                        if i < len(st.session_state.search_strategy.proximity_rules)
+                        else None
+                    )
 
                     with col1:
-                        st.metric(
-                            "Recall priority",
-                            _path.get("recall_priority", 0),
+                        default_left_index = 0
+
+                        if existing_rule:
+                            if existing_rule.left_term in all_strategy_terms:
+                                default_left_index = all_strategy_terms.index(
+                                    existing_rule.left_term
+                                )
+
+                        left_term = st.selectbox(
+                            "Left term",
+                            all_strategy_terms,
+                            index=default_left_index,
+                            key=f"proximity_left_{i}",
                         )
 
                     with col2:
-                        st.metric(
-                            "Precision priority",
-                            _path.get("precision_priority", 0),
+                        operators = [
+                            "ADJ",
+                            "NEAR",
+                            "WITH",
+                            "SAME",
+                        ]
+
+                        default_operator_index = 0
+
+                        if existing_rule:
+                            if existing_rule.operator in operators:
+                                default_operator_index = operators.index(
+                                    existing_rule.operator
+                                )
+
+                        operator = st.selectbox(
+                            "Operator",
+                            operators,
+                            index=default_operator_index,
+                            key=f"proximity_operator_{i}",
                         )
 
-                    st.code(
-                        _path.get("expression", ""),
-                        language="text",
+                    with col3:
+                        default_right_index = (
+                            1 if len(all_strategy_terms) > 1 else 0
+                        )
+
+                        if existing_rule:
+                            if existing_rule.right_term in all_strategy_terms:
+                                default_right_index = all_strategy_terms.index(
+                                    existing_rule.right_term
+                                )
+
+                        right_term = st.selectbox(
+                            "Right term",
+                            all_strategy_terms,
+                            index=default_right_index,
+                            key=f"proximity_right_{i}",
+                        )
+
+                    distance = 1
+
+                    if operator in {"ADJ", "NEAR"}:
+                        distance = st.number_input(
+                            "Distance",
+                            min_value=1,
+                            max_value=50,
+                            value=(
+                                existing_rule.distance
+                                if existing_rule and existing_rule.distance
+                                else 1
+                            ),
+                            step=1,
+                            key=f"proximity_distance_{i}",
+                        )
+
+                    field = st.selectbox(
+                        "Field",
+                        ["title", "abstract", "claims"],
+                        index=2,
+                        key=f"proximity_field_{i}",
                     )
+
+                    proximity_rules.append(
+                        ProximityRule(
+                            left_term=left_term,
+                            right_term=right_term,
+                            operator=operator,
+                            distance=distance,
+                            field=field,
+                        )
+                    )
+
+                    st.divider()
+
+                if st.button(
+                    "Save Proximity Rules",
+                    key="save_proximity_rules",
+                ):
+                    if st.session_state.search_strategy:
+                        st.session_state.search_strategy.proximity_rules = (
+                            proximity_rules
+                        )
+
+                        st.session_state.search_strategy_approved = False
+                        st.session_state.ai_search_concepts_approved = False
+
+                        st.success(
+                            f"Saved {len(proximity_rules)} proximity rule(s)."
+                        )
+
+                # ── Generated proximity expressions ────────────────────
+
+                if st.session_state.search_strategy.proximity_rules:
+                    st.markdown("### Generated USPTO Proximity Search")
+
+                    _proximity_strings = build_uspto_proximity_strings(
+                        st.session_state.search_strategy
+                    )
+
+                    if _proximity_strings:
+                        for _expression in _proximity_strings:
+                            st.code(_expression, language="text")
 
             else:
                 st.info(
-                    "No AI Invention Structure search paths have "
-                    "been approved yet."
+                    "Add search concepts and terms before defining "
+                    "proximity rules."
                 )
 
-        # ── Proximity Rules ────────────────────────────────────
-
-        st.markdown("### Proximity Rules")
-        st.caption(
-            "Define relationships between search terms. "
-            "Distance applies to ADJ and NEAR."
-        )
-
-        all_strategy_terms = []
-
-        for concept in st.session_state.search_strategy.concepts:
-            for term in concept.terms:
-                term = term.strip()
-                if term and term not in all_strategy_terms:
-                    all_strategy_terms.append(term)
-
-        if all_strategy_terms:
-            proximity_count = st.number_input(
-                "Number of proximity rules",
-                min_value=0,
-                max_value=10,
-                value=len(st.session_state.search_strategy.proximity_rules),
-                step=1,
-                key="proximity_rule_count",
-            )
-
-            proximity_rules = []
-
-            for i in range(proximity_count):
-                st.markdown(f"**Proximity Rule {i + 1}**")
-
-                col1, col2, col3 = st.columns(3)
-
-                existing_rule = (
-                    st.session_state.search_strategy.proximity_rules[i]
-                    if i < len(st.session_state.search_strategy.proximity_rules)
-                    else None
+            if st.session_state.search_strategy_approved:
+                st.success(
+                    "Search strategy approved — ready for search-string generation."
                 )
 
-                with col1:
-                    default_left_index = 0
 
-                    if existing_rule:
-                        if existing_rule.left_term in all_strategy_terms:
-                            default_left_index = all_strategy_terms.index(
-                                existing_rule.left_term
-                            )
-
-                    left_term = st.selectbox(
-                        "Left term",
-                        all_strategy_terms,
-                        index=default_left_index,
-                        key=f"proximity_left_{i}",
-                    )
-
-                with col2:
-                    operators = [
-                        "ADJ",
-                        "NEAR",
-                        "WITH",
-                        "SAME",
-                    ]
-
-                    default_operator_index = 0
-
-                    if existing_rule:
-                        if existing_rule.operator in operators:
-                            default_operator_index = operators.index(
-                                existing_rule.operator
-                            )
-
-                    operator = st.selectbox(
-                        "Operator",
-                        operators,
-                        index=default_operator_index,
-                        key=f"proximity_operator_{i}",
-                    )
-
-                with col3:
-                    default_right_index = (
-                        1 if len(all_strategy_terms) > 1 else 0
-                    )
-
-                    if existing_rule:
-                        if existing_rule.right_term in all_strategy_terms:
-                            default_right_index = all_strategy_terms.index(
-                                existing_rule.right_term
-                            )
-
-                    right_term = st.selectbox(
-                        "Right term",
-                        all_strategy_terms,
-                        index=default_right_index,
-                        key=f"proximity_right_{i}",
-                    )
-
-                distance = 1
-
-                if operator in {"ADJ", "NEAR"}:
-                    distance = st.number_input(
-                        "Distance",
-                        min_value=1,
-                        max_value=50,
-                        value=(
-                            existing_rule.distance
-                            if existing_rule and existing_rule.distance
-                            else 1
-                        ),
-                        step=1,
-                        key=f"proximity_distance_{i}",
-                    )
-
-                field = st.selectbox(
-                    "Field",
-                    ["title", "abstract", "claims"],
-                    index=2,
-                    key=f"proximity_field_{i}",
-                )
-
-                proximity_rules.append(
-                    ProximityRule(
-                        left_term=left_term,
-                        right_term=right_term,
-                        operator=operator,
-                        distance=distance,
-                        field=field,
-                    )
-                )
-
-                st.divider()
-
-            if st.button(
-                "Save Proximity Rules",
-                key="save_proximity_rules",
-            ):
-                if st.session_state.search_strategy:
-                    st.session_state.search_strategy.proximity_rules = (
-                        proximity_rules
-                    )
-
-                    st.session_state.search_strategy_approved = False
-
-                    st.success(
-                        f"Saved {len(proximity_rules)} proximity rule(s)."
-                    )
-
-            # ── Generated proximity expressions ────────────────────
-
-            if st.session_state.search_strategy.proximity_rules:
-                st.markdown("### Generated USPTO Proximity Search")
-
-                _proximity_strings = build_uspto_proximity_strings(
-                    st.session_state.search_strategy
-                )
-
-                if _proximity_strings:
-                    for _expression in _proximity_strings:
-                        st.code(_expression, language="text")
-
-        else:
-            st.info(
-                "Add search concepts and terms before defining "
-                "proximity rules."
-            )
-
-        if st.session_state.search_strategy_approved:
-            st.success(
-                "Search strategy approved — ready for search-string generation."
-            )
-
-
-# ── JSON format input ──────────────────────────────────────────────────────────
-_JSON_PLACEHOLDER = (
-    '{\n'
-    '  "groups": [\n'
-    '    {\n'
-    '      "terms": [\n'
-    '        "autonomous vehicle",\n'
-    '        "self-driving vehicle",\n'
-    '        "driverless vehicle",\n'
-    '        "autonomous driving system"\n'
-    '      ]\n'
-    '    },\n'
-    '    {\n'
-    '      "terms": [\n'
-    '        "lane detection",\n'
-    '        "lane recognition",\n'
-    '        "lane boundary detection",\n'
-    '        "road lane identification"\n'
-    '      ]\n'
-    '    },\n'
-    '    {\n'
-    '      "terms": [\n'
-    '        "infrared sensor",\n'
-    '        "IR detector",\n'
-    '        "infrared camera",\n'
-    '        "infrared camera based lane detection"\n'
-    '      ]\n'
-    '    }\n'
-    '  ],\n'
-    '  "combine_groups_with": "AND"\n'
-    '}'
-)
-
-with st.expander("📋 JSON Format  *(optional — overrides Mistral expansion)*", expanded=bool(st.session_state.json_query)):
+    # ── Retrieval execution and results ───────────────────────────────────────────
+    st.divider()
+    st.subheader("3. Retrieval Execution & Results")
     st.caption(
-        "Paste a structured JSON query to bypass Mistral and use your own term groups. "
-        "The **Technology query** above is still used for embedding-based ranking."
+        "Run the approved strategy or the standard pipeline here. Retrieved records, "
+        "deduplication, ranking, and analysis appear in the results below."
     )
-    st.info(
-        "💡 **Tips for better precision:**\n"
-        "- Aim for **3–4 terms per group** — more synonyms = better recall without losing precision\n"
-        "- Add at least one **specific technical phrase** per group "
-        "(e.g. `\"infrared camera based lane detection\"` instead of just `\"infrared sensor\"`)\n"
-        "- Add a **constraint group** for key technology constraints "
-        "(e.g. `{\"terms\": [\"real-time processing\", \"embedded system\"]}` combined with AND)\n"
-        "- Multi-word terms are automatically quoted for phrase matching"
-    )
-    _json_raw = st.text_area(
-        "json_query_area",
-        value=st.session_state.json_query,
-        height=190,
-        placeholder=_JSON_PLACEHOLDER,
-        label_visibility="collapsed",
-        key="json_query_input",
-    )
-    st.session_state.json_query = _json_raw
 
-    # Live validation
-    if _json_raw.strip():
-        try:
-            from services.json_query_service import (
-                validate_json_query as _vjq_live,
-                build_boolean_string as _bbs_live,
-            )
-            _schema_live = _vjq_live(_json_raw)
-            _combine_live = _schema_live.combine_with
-            _n_groups_live = len(_schema_live.groups)
-            _n_terms_live  = len(_schema_live.all_terms)
-            st.success(
-                f"✅ Valid — {_n_groups_live} groups, {_n_terms_live} terms "
-                f"(combined with **{_combine_live}**). Mistral expansion will be skipped."
-            )
-            st.caption(f"**Boolean Query:** `{_bbs_live(_schema_live)}`")
-            # Nudge toward richer groups
-            _thin = [
-                i + 1 for i, g in enumerate(_schema_live.groups)
-                if len(g.terms) < 3
-            ]
-            if _thin:
-                _glist = ", ".join(f"group {n}" for n in _thin)
-                st.warning(
-                    f"⚠️ {_glist} {'has' if len(_thin) == 1 else 'have'} fewer than 3 terms. "
-                    "Consider adding more synonyms or a specific technical phrase to improve precision."
+    # ── JSON format input ──────────────────────────────────────────────────────────
+    _JSON_PLACEHOLDER = (
+        '{\n'
+        '  "groups": [\n'
+        '    {\n'
+        '      "terms": [\n'
+        '        "autonomous vehicle",\n'
+        '        "self-driving vehicle",\n'
+        '        "driverless vehicle",\n'
+        '        "autonomous driving system"\n'
+        '      ]\n'
+        '    },\n'
+        '    {\n'
+        '      "terms": [\n'
+        '        "lane detection",\n'
+        '        "lane recognition",\n'
+        '        "lane boundary detection",\n'
+        '        "road lane identification"\n'
+        '      ]\n'
+        '    },\n'
+        '    {\n'
+        '      "terms": [\n'
+        '        "infrared sensor",\n'
+        '        "IR detector",\n'
+        '        "infrared camera",\n'
+        '        "infrared camera based lane detection"\n'
+        '      ]\n'
+        '    }\n'
+        '  ],\n'
+        '  "combine_groups_with": "AND"\n'
+        '}'
+    )
+
+    with st.expander("📋 JSON Format  *(optional — overrides Mistral expansion)*", expanded=bool(st.session_state.json_query)):
+        st.caption(
+            "Paste a structured JSON query to bypass Mistral and use your own term groups. "
+            "The **Technology query** above is still used for embedding-based ranking."
+        )
+        st.info(
+            "💡 **Tips for better precision:**\n"
+            "- Aim for **3–4 terms per group** — more synonyms = better recall without losing precision\n"
+            "- Add at least one **specific technical phrase** per group "
+            "(e.g. `\"infrared camera based lane detection\"` instead of just `\"infrared sensor\"`)\n"
+            "- Add a **constraint group** for key technology constraints "
+            "(e.g. `{\"terms\": [\"real-time processing\", \"embedded system\"]}` combined with AND)\n"
+            "- Multi-word terms are automatically quoted for phrase matching"
+        )
+        _json_raw = st.text_area(
+            "json_query_area",
+            value=st.session_state.json_query,
+            height=190,
+            placeholder=_JSON_PLACEHOLDER,
+            label_visibility="collapsed",
+            key="json_query_input",
+        )
+        st.session_state.json_query = _json_raw
+
+        # Live validation
+        if _json_raw.strip():
+            try:
+                from services.json_query_service import (
+                    validate_json_query as _vjq_live,
+                    build_boolean_string as _bbs_live,
                 )
-        except Exception as _json_err:
-            st.error(f"❌ Invalid JSON — {_json_err}")
-    else:
-        st.caption("_No JSON pasted — Mistral expansion will run normally._")
+                _schema_live = _vjq_live(_json_raw)
+                _combine_live = _schema_live.combine_with
+                _n_groups_live = len(_schema_live.groups)
+                _n_terms_live  = len(_schema_live.all_terms)
+                st.success(
+                    f"✅ Valid — {_n_groups_live} groups, {_n_terms_live} terms "
+                    f"(combined with **{_combine_live}**). Mistral expansion will be skipped."
+                )
+                st.caption(f"**Boolean Query:** `{_bbs_live(_schema_live)}`")
+                # Nudge toward richer groups
+                _thin = [
+                    i + 1 for i, g in enumerate(_schema_live.groups)
+                    if len(g.terms) < 3
+                ]
+                if _thin:
+                    _glist = ", ".join(f"group {n}" for n in _thin)
+                    st.warning(
+                        f"⚠️ {_glist} {'has' if len(_thin) == 1 else 'have'} fewer than 3 terms. "
+                        "Consider adding more synonyms or a specific technical phrase to improve precision."
+                    )
+            except Exception as _json_err:
+                st.error(f"❌ Invalid JSON — {_json_err}")
+        else:
+            st.caption("_No JSON pasted — Mistral expansion will run normally._")
 
-col1, col2, col3 = st.columns([2, 2, 1])
-run_to_top20 = col1.button("▶ Run to Top 20", type="primary", width="stretch")
-run_claude   = col2.button("🤖 Send Ranked Results to Claude", width="stretch",
-                            disabled=(st.session_state.stage < 3))
-col3.button("🔄 Reset", on_click=_reset, width="stretch")
+    col1, col2, col3 = st.columns([2, 2, 1])
+    run_to_top20 = col1.button("▶ Run to Top 20", type="primary", width="stretch")
+    run_claude   = col2.button("🤖 Send Ranked Results to Claude", width="stretch",
+                                disabled=(st.session_state.stage < 3))
+    col3.button("🔄 Reset", on_click=_reset, width="stretch")
 
-if st.session_state.error:
-    st.error(st.session_state.error)
+    if st.session_state.error:
+        st.error(st.session_state.error)
 
-st.divider()
+    st.divider()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HELPERS
@@ -1764,6 +1948,13 @@ def _run_search(queries: list[str]) -> tuple[list, list]:
             path_results.append(
                 {
                     "name": path_name,
+                    "expression": expression,
+                    "original_expression": expression,
+                    "reruns": [],
+                    "status": (
+                        "success" if results else "zero_results"
+                    ),
+                    "error": None,
                     "quality_level": path.get(
                         "quality_level",
                         "balanced",
@@ -1777,6 +1968,7 @@ def _run_search(queries: list[str]) -> tuple[list, list]:
                         0,
                     ),
                     "count": len(results),
+                    "limit": limit,
                 }
             )
 
@@ -2152,14 +2344,12 @@ def _run_search_json(schema) -> tuple[list, list]:
     return all_raw, unique
 
 
-def _run_claude(q: str, ranked: list) -> tuple[str, str]:
+def _run_claude(q: str, ranked: list) -> str:
     from models.claude_client import ClaudeClient
     from services.comparison_service import compare_patents
-    from services.report_service import generate
+
     claude = ClaudeClient()
-    comparison = compare_patents(q, ranked, claude)
-    report     = generate(q, ranked, comparison, claude)
-    return comparison, report
+    return compare_patents(q, ranked, claude)
 
 
 def _timed(label: str, fn, *args, **kwargs):
@@ -2361,17 +2551,23 @@ if run_to_top20 and query.strip():
 
 if run_claude and st.session_state.stage >= 3:
     try:
-        with st.spinner("Calling Claude for technical comparison & report…"):
-            comparison, report = _timed(
-                "4. Claude analysis", _run_claude,
-                query, st.session_state.ranked
+        # Invalidate the previous analysis before generating a new one.
+        st.session_state.comparison = ""
+        st.session_state.report = ""
+
+        with st.spinner("Calling Claude for technical comparison…"):
+            comparison = _timed(
+                "4. Claude comparison",
+                _run_claude,
+                query,
+                st.session_state.ranked,
             )
-            logger.debug("Claude comparison length=%d report length=%d", len(comparison), len(report))
+
         st.session_state.comparison = comparison
-        st.session_state.report     = report
-        st.session_state.stage      = 4
+        st.session_state.stage = 4
+
     except Exception as exc:
-        logger.exception("Unhandled exception during Claude call")
+        logger.exception("Unhandled exception during Claude comparison")
         st.session_state.error = f"{type(exc).__name__}: {exc}"
 
 
@@ -2379,15 +2575,12 @@ if run_claude and st.session_state.stage >= 3:
 # RESULTS DISPLAY
 # ══════════════════════════════════════════════════════════════════════════════
 
-tab_expand, tab_search, tab_rank, tab_claude = st.tabs([
-    "1 · Query Expansion",
-    "2 · Search Results",
-    "3 · Technical Relevance",
-    "4 · Claude Technical Analysis",
-])
+# Results are rendered as separate screens selected from the sidebar.
+# Switching views only changes the displayed section; pipeline results remain in
+# st.session_state and the retrieval pipeline is not rerun.
 
-# ── Tab 1: Query Expansion ──────────────────────────────────────────────────
-with tab_expand:
+# ── Screen 1: Query Expansion ───────────────────────────────────────────────
+if result_view == "Query Expansion":
     if st.session_state.expanded_queries:
 
         # ── JSON mode panel ────────────────────────────────────────────────
@@ -2534,8 +2727,219 @@ with tab_expand:
     else:
         st.info("Run the pipeline to see expanded queries here.")
 
-# ── Tab 2: Search Results ───────────────────────────────────────────────────
-with tab_search:
+# ── Screen 2: Search Results ────────────────────────────────────────────────
+elif result_view == "Search Results":
+    _path_results = st.session_state.get(
+        "ai_search_path_results", []
+    )
+
+    _zero_paths = [
+        (index, path)
+        for index, path in enumerate(_path_results)
+        if path.get("count", 0) == 0
+        or path.get("status") == "error"
+    ]
+
+    if _zero_paths:
+        st.markdown("### Search paths requiring attention")
+        st.caption(
+            "Edit and rerun only a search path that returned no records "
+            "or encountered an error. The original query is retained."
+        )
+
+        for _path_index, _path in _zero_paths:
+            with st.expander(
+                f"🔎 {_path['name']} — "
+                f"{_path.get('status', 'zero_results')}",
+                expanded=True,
+            ):
+                st.write("**Original query**")
+                st.code(
+                    _path.get("original_expression", ""),
+                    language="text",
+                )
+
+                if _path.get("error"):
+                    st.error(
+                        "The last attempt failed: "
+                        + _path["error"]
+                    )
+                elif _path.get("count", 0) == 0:
+                    st.warning(
+                        "This search path returned zero records."
+                    )
+
+                _edited_expression = st.text_area(
+                    "Edit Boolean search expression",
+                    value=_path.get("expression", ""),
+                    key=f"manual_retry_expression_{_path_index}",
+                    height=100,
+                )
+
+                if st.button(
+                    "Rerun this search path",
+                    key=f"manual_retry_button_{_path_index}",
+                    type="primary",
+                ):
+                    _edited_expression = (
+                        _edited_expression.strip()
+                    )
+
+                    if not _edited_expression:
+                        st.warning(
+                            "Enter a search expression before rerunning."
+                        )
+                    else:
+                        try:
+                            from services.uspto_search_service import (
+                                search_patents_by_strategy,
+                            )
+                            from services.dedup_service import deduplicate
+
+                            _previous_expression = _path.get(
+                                "expression", ""
+                            )
+                            _search_limit = _path.get("limit", 100)
+
+                            with st.spinner(
+                                f"Rerunning {_path['name']}..."
+                            ):
+                                _new_results = (
+                                    search_patents_by_strategy(
+                                        query=_edited_expression,
+                                        limit=_search_limit,
+                                        offset=0,
+                                    )
+                                )
+
+                            _new_results = [
+                                patent
+                                for patent in (_new_results or [])
+                                if patent is not None
+                            ]
+
+                            _path.setdefault("reruns", []).append(
+                                {
+                                    "query": _edited_expression,
+                                    "previous_query": (
+                                        _previous_expression
+                                    ),
+                                    "count": len(_new_results),
+                                    "timestamp": time.strftime(
+                                        "%Y-%m-%d %H:%M:%S"
+                                    ),
+                                    "status": (
+                                        "success"
+                                        if _new_results
+                                        else "zero_results"
+                                    ),
+                                }
+                            )
+
+                            _path["expression"] = _edited_expression
+                            _path["count"] = len(_new_results)
+                            _path["status"] = (
+                                "success"
+                                if _new_results
+                                else "zero_results"
+                            )
+                            _path["error"] = None
+
+                            if _new_results:
+                                for _patent in _new_results:
+                                    _existing_paths = list(
+                                        getattr(
+                                            _patent,
+                                            "search_paths",
+                                            [],
+                                        )
+                                        or []
+                                    )
+                                    if _path["name"] not in _existing_paths:
+                                        _patent.search_paths = (
+                                            _existing_paths
+                                            + [_path["name"]]
+                                        )
+
+                                _combined_raw = (
+                                    list(
+                                        st.session_state.raw_patents
+                                    )
+                                    + _new_results
+                                )
+                                _combined_unique = deduplicate(
+                                    _combined_raw
+                                )
+
+                                st.session_state.raw_patents = (
+                                    _combined_raw
+                                )
+                                st.session_state.unique_patents = (
+                                    _combined_unique
+                                )
+
+                                # Rank the refreshed, deduplicated candidate pool.
+                                # The previous classification-refined list may be
+                                # stale because it was created before this manual retry.
+                                _ranking_patents = _combined_unique
+
+                                with st.spinner(
+                                    "Updating technical relevance ranking..."
+                                ):
+                                    st.session_state.ranked = _run_rank(
+                                        query,
+                                        _ranking_patents,
+                                        top_k,
+                                    )
+
+                                st.session_state.stage = 3
+
+                            st.session_state.ai_search_path_results = (
+                                _path_results
+                            )
+
+                            if _new_results:
+                                st.success(
+                                    f"Retrieved {len(_new_results)} records. "
+                                    "The candidate pool and ranking have "
+                                    "been refreshed."
+                                )
+                            else:
+                                st.warning(
+                                    "The refined query also returned "
+                                    "zero records. You can edit it and "
+                                    "try again."
+                                )
+
+                            st.rerun()
+
+                        except Exception as exc:
+                            logger.exception(
+                                "Manual search-path rerun failed"
+                            )
+                            _path["status"] = "error"
+                            _path["error"] = (
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                            st.session_state.ai_search_path_results = (
+                                _path_results
+                            )
+                            st.rerun()
+
+                _history = _path.get("reruns", [])
+                if _history:
+                    st.markdown("**Previous rerun attempts**")
+                    for _attempt in _history:
+                        st.caption(
+                            f"{_attempt['timestamp']} · "
+                            f"{_attempt['status']} · "
+                            f"{_attempt['count']} records"
+                        )
+                        st.code(
+                            _attempt["query"],
+                            language="text",
+                        )
+
     if st.session_state.unique_patents:
         raw_count    = len(st.session_state.raw_patents)
         unique_count = len(st.session_state.unique_patents)
@@ -2743,35 +3147,103 @@ with tab_search:
                 )
 
         st.divider()
-        rows = [
+        st.subheader("Patent Results & Preview")
+        st.caption(
+            "Select a row to inspect the patent. The retrieval, deduplication, "
+            "and ranking results are unchanged."
+        )
+
+        _patents_for_preview = list(st.session_state.unique_patents)
+        _result_rows = [
             {
-                "patent_id": p.patent_id,
-                "family_id": p.continuity_family_id or "—",
-                "title": "\n".join(
-                    textwrap.wrap(
-                        p.patent_title or "",
-                        width=80,
-                    )
-                ),
-                "type": p.patent_type or "—",
-                "date": p.patent_date or "—",
+                "Patent ID": str(getattr(p, "patent_id", "") or "—"),
+                "Family ID": str(getattr(p, "continuity_family_id", "") or "—"),
+                "Title": str(getattr(p, "patent_title", "") or "Untitled patent"),
+                "Type": str(getattr(p, "patent_type", "") or "—"),
+                "Date": str(getattr(p, "patent_date", "") or "—"),
             }
-            for p in st.session_state.unique_patents
+            for p in _patents_for_preview
         ]
-        df = pd.DataFrame(rows)
-        st.dataframe(df, width="stretch", hide_index=True,
-                     column_config={"title": st.column_config.TextColumn(width="large")})
-        st.divider()
-        st.subheader("Readable titles")
-        _jg = st.session_state.json_groups
-        for p in st.session_state.unique_patents:
-            if _jg:
-                st.markdown(
-                    "• " + _badges_for(p.patent_title or "", p.patent_abstract or "", _jg),
-                    unsafe_allow_html=True,
-                )
+        _results_df = pd.DataFrame(_result_rows)
+
+        _table_col, _preview_col = st.columns([3, 2], gap="medium")
+        with _table_col:
+            st.markdown("#### Retrieved patents")
+            _table_event = st.dataframe(
+                _results_df,
+                width="stretch",
+                hide_index=True,
+                height=520,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="patent_results_select_table",
+                column_config={
+                    "Patent ID": st.column_config.TextColumn(width="small"),
+                    "Family ID": st.column_config.TextColumn(width="small"),
+                    "Title": st.column_config.TextColumn(width="large"),
+                    "Type": st.column_config.TextColumn(width="small"),
+                    "Date": st.column_config.TextColumn(width="small"),
+                },
+            )
+
+        _selected_rows = []
+        try:
+            _selected_rows = list(_table_event.selection.rows)
+        except (AttributeError, TypeError):
+            _selected_rows = []
+
+        _selected_key = "patent_preview_selected_index"
+        if _selected_rows:
+            _selected_index = int(_selected_rows[0])
+            if 0 <= _selected_index < len(_patents_for_preview):
+                st.session_state[_selected_key] = _selected_index
+        elif _selected_key not in st.session_state:
+            st.session_state[_selected_key] = 0
+
+        _preview_index = st.session_state.get(_selected_key, 0)
+        if not isinstance(_preview_index, int) or not (0 <= _preview_index < len(_patents_for_preview)):
+            _preview_index = 0
+            st.session_state[_selected_key] = 0
+        _selected_patent = _patents_for_preview[_preview_index]
+
+        with _preview_col:
+            st.markdown("#### Patent Preview")
+            _preview_id = str(getattr(_selected_patent, "patent_id", "") or "—")
+            _preview_title = str(getattr(_selected_patent, "patent_title", "") or "Untitled patent")
+            st.markdown(f"**{_preview_title}**")
+            st.caption(f"Publication / Patent ID: {_preview_id}")
+
+            _preview_meta = [
+                ("Family ID", getattr(_selected_patent, "continuity_family_id", None)),
+                ("Type", getattr(_selected_patent, "patent_type", None)),
+                ("Publication date", getattr(_selected_patent, "patent_date", None)),
+            ]
+            for _label, _value in _preview_meta:
+                if _value:
+                    st.markdown(f"**{_label}:** { _value }")
+
+            _preview_abstract = str(getattr(_selected_patent, "patent_abstract", "") or "").strip()
+            if _preview_abstract:
+                st.markdown("##### Abstract")
+                st.write(_preview_abstract)
             else:
-                st.write(f"• {p.patent_id} — {p.patent_title}")
+                st.info("No abstract is available for this record.")
+
+            _preview_claims = getattr(_selected_patent, "patent_claims", None)
+            if _preview_claims:
+                with st.expander("Claims", expanded=False):
+                    if isinstance(_preview_claims, (list, tuple)):
+                        st.write("\n\n".join(str(claim) for claim in _preview_claims))
+                    else:
+                        st.write(str(_preview_claims))
+
+            _preview_url = (
+                getattr(_selected_patent, "patent_url", None)
+                or getattr(_selected_patent, "url", None)
+                or getattr(_selected_patent, "google_patents_url", None)
+            )
+            if _preview_url and str(_preview_url).startswith(("http://", "https://")):
+                st.link_button("Open original patent", str(_preview_url), use_container_width=True)
     else:
         st.info("Run the pipeline to see raw search results here.")
 
@@ -2788,10 +3260,9 @@ with tab_search:
 
     # ── CPC ────────────────────────────────────────────────
     cpc_data = classification_data.get("cpc", {})
+    st.markdown("### CPC")
 
     if cpc_data:
-        st.markdown("### CPC")
-
         cpc_rows = []
         for classification, data in sorted(
             cpc_data.items(),
@@ -2931,6 +3402,11 @@ with tab_search:
                     width="stretch",
                     hide_index=True,
                 )
+    else:
+        st.info(
+            "No CPC classifications were found in the current unique patent results. "
+            "Check whether the search backend returned CPC data for these records."
+        )
 
     # ── USPC ───────────────────────────────────────────────
     uspc_data = classification_data.get("uspc", {})
@@ -4012,8 +4488,8 @@ with tab_search:
             "USPTO ODP application-search response."
         )
 
-# ── Tab 3: Technical Relevance ─────────────────────────────────────────────────────
-with tab_rank:
+# ── Screen 3: Technical Relevance ───────────────────────────────────────────
+elif result_view == "Technical Relevance":
     if st.session_state.ranked:
         ranking_source = st.session_state.get(
             "classification_refined_patents",
@@ -4036,177 +4512,195 @@ with tab_rank:
         )
 
         rows = []
+        strategy = st.session_state.get("search_strategy")
+        critical_names = {
+            concept.name
+            for concept in (getattr(strategy, "concepts", []) or [])
+            if str(getattr(concept, "importance", "")).strip().lower() == "critical"
+        }
+
         for i, rp in enumerate(st.session_state.ranked, 1):
-            strategy = st.session_state.get("search_strategy")
-            critical_names = {
-                concept.name
-                for concept in (getattr(strategy, "concepts", []) or [])
-                if str(concept.importance).strip().lower() == "critical"
-            }
             evaluated_critical = critical_names.intersection(rp.importance_hits)
             matched_critical = sum(
                 bool(rp.importance_hits[name])
                 for name in evaluated_critical
             )
-
             critical_match_summary = (
                 f"{matched_critical}/{len(evaluated_critical)}"
-                if evaluated_critical
-                else "Not evaluated"
+                if evaluated_critical else "Not evaluated"
             )
-
             evidence_status = (
                 "Insufficient text"
                 if rp.text_status == "insufficient_text"
                 else "Text available"
             )
-
             rows.append({
-                "#": i,
-                "patent_id": rp.patent.patent_id,
-                "title": "\n".join(textwrap.wrap(rp.patent.patent_title or "", width=80)),
-                "type": rp.patent.patent_type or "—",
-                "date": rp.patent.patent_date or "—",
-                "hybrid": (
-                    round(rp.hybrid_score, 4)
-                    if rp.hybrid_score is not None else None
-                ),
-                "importance": (
-                    round(rp.importance_score, 4)
-                    if rp.importance_score is not None
-                    else None
-                ),
-                "text_status": rp.text_status,
-                "evidence_status": evidence_status,
-                "critical_concepts_matched": critical_match_summary,
-                "cosine": (
-                    round(rp.cosine_score, 4)
-                    if rp.cosine_score is not None else None
-                ),
-                "bm25": (
-                    round(rp.bm25_score, 4)
-                    if rp.bm25_score is not None else None
-                ),
-                "concept_coverage": (
-                    ", ".join(
-                        name
-                        for name, hit in rp.importance_hits.items()
-                        if hit
-                    )
-                    or "—"
-                ),
-                "Search Paths": ", ".join(rp.search_paths) if rp.search_paths else "—",
+                "Patent ID": str(getattr(rp.patent, "patent_id", "") or "—"),
+                "Title": str(getattr(rp.patent, "patent_title", "") or "Untitled patent"),
+                "Type": getattr(rp.patent, "patent_type", None) or "—",
+                "Date": getattr(rp.patent, "patent_date", None) or "—",
+                "Hybrid score": round(rp.hybrid_score, 4) if rp.hybrid_score is not None else None,
+                "BM25 score": round(rp.bm25_score, 4) if rp.bm25_score is not None else None,
+                "Cosine score": round(rp.cosine_score, 4) if rp.cosine_score is not None else None,
             })
 
-        df = pd.DataFrame(rows)
-        st.dataframe(
-            df, width="stretch", hide_index=True,
-            column_config={
-                "title":  st.column_config.TextColumn(width="large"),
-                "hybrid": st.column_config.ProgressColumn(
-                    "hybrid", format="%.4f", min_value=0, max_value=1
-                ),
-            },
-        )
-        st.divider()
-        st.subheader("Readable titles")
-        _jg = st.session_state.json_groups
-        for i, rp in enumerate(st.session_state.ranked, 1):
-            p = rp.patent
-            if _jg:
-                st.markdown(
-                    f"{i}. <b>{p.patent_id}</b> — "
-                    + _badges_for(p.patent_title or "", p.patent_abstract or "", _jg),
-                    unsafe_allow_html=True,
+        relevance_df = pd.DataFrame(rows)
+        table_col, preview_col = st.columns([3, 2], gap="medium")
+        with table_col:
+            st.subheader("Ranked patents")
+            st.caption("Select a row to inspect its technical relevance and evidence.")
+            table_event = st.dataframe(
+                relevance_df,
+                width="stretch",
+                hide_index=True,
+                height=560,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="technical_relevance_select_table",
+                column_config={
+                    "Patent ID": st.column_config.TextColumn(width="medium"),
+                    "Title": st.column_config.TextColumn(width="large"),
+                    "Hybrid score": st.column_config.NumberColumn(format="%.4f", width="small"),
+                    "BM25 score": st.column_config.NumberColumn(format="%.4f", width="small"),
+                    "Cosine score": st.column_config.NumberColumn(format="%.4f", width="small"),
+                },
+            )
+
+        selected_rows = []
+        try:
+            selected_rows = list(table_event.selection.rows)
+        except (AttributeError, TypeError):
+            selected_rows = []
+
+        selected_key = "technical_relevance_selected_index"
+        if selected_rows:
+            selected_index = int(selected_rows[0])
+            if 0 <= selected_index < len(st.session_state.ranked):
+                st.session_state[selected_key] = selected_index
+        elif selected_key not in st.session_state:
+            st.session_state[selected_key] = 0
+
+        selected_index = st.session_state.get(selected_key, 0)
+        if not isinstance(selected_index, int) or not (0 <= selected_index < len(st.session_state.ranked)):
+            selected_index = 0
+            st.session_state[selected_key] = 0
+
+        selected_ranked = st.session_state.ranked[selected_index]
+        patent = selected_ranked.patent
+        with preview_col:
+            st.subheader("Technical Relevance Preview")
+            st.markdown(f"**{getattr(patent, 'patent_title', None) or 'Untitled patent'}**")
+            st.caption(f"Patent ID: {getattr(patent, 'patent_id', None) or '—'}")
+
+            metadata = [
+                ("Type", getattr(patent, "patent_type", None)),
+                ("Publication date", getattr(patent, "patent_date", None)),
+                ("Text status", "Insufficient text" if selected_ranked.text_status == "insufficient_text" else "Text available"),
+            ]
+            for label, value in metadata:
+                if value:
+                    st.markdown(f"**{label}:** {value}")
+
+            def format_score(value):
+                return f"{value:.4f}" if value is not None else "N/A"
+
+            st.markdown("##### Relevance scores")
+            st.markdown(
+                f"**Hybrid:** `{format_score(selected_ranked.hybrid_score)}`  \n"
+                f"**Importance:** `{format_score(selected_ranked.importance_score)}`  \n"
+                f"**Cosine:** `{format_score(selected_ranked.cosine_score)}`  \n"
+                f"**BM25:** `{format_score(selected_ranked.bm25_score)}`"
+            )
+
+            if selected_ranked.importance_hits:
+                matched_concepts = [
+                    name for name, hit in selected_ranked.importance_hits.items() if hit
+                ]
+                unmatched_concepts = [
+                    name for name, hit in selected_ranked.importance_hits.items() if not hit
+                ]
+                st.markdown("##### Search strategy evidence")
+                st.write(
+                    f"**Matched concepts:** {len(matched_concepts)} of "
+                    f"{len(selected_ranked.importance_hits)}"
                 )
+                with st.expander("Matched concepts", expanded=True):
+                    if matched_concepts:
+                        for name in matched_concepts:
+                            st.write(f"✅ {name}")
+                    else:
+                        st.write("No concepts matched.")
+                with st.expander("Unmatched concepts"):
+                    if unmatched_concepts:
+                        for name in unmatched_concepts:
+                            st.write(f"— {name}")
+                    else:
+                        st.write("All evaluated concepts matched.")
+
+            json_groups = st.session_state.get("json_groups")
+            if json_groups:
+                from services.json_query_service import match_groups_in_text
+                matches = match_groups_in_text(
+                    f"{getattr(patent, 'patent_title', '')} "
+                    f"{getattr(patent, 'patent_abstract', '') or ''}",
+                    json_groups,
+                )
+                if matches:
+                    badges = " ".join(
+                        _group_badge_html(idx, term) for idx, term in matches
+                    )
+                    st.markdown(f"**Matched groups:** {badges}", unsafe_allow_html=True)
+
+            abstract = str(getattr(patent, "patent_abstract", "") or "").strip()
+            if abstract:
+                with st.expander("Abstract", expanded=True):
+                    st.write(abstract)
             else:
-                st.write(f"{i}. {p.patent_id} — {p.patent_title}")
+                st.info("No abstract is available for this record.")
 
-        st.divider()
-        st.subheader("Score distribution")
-        chart_df = pd.DataFrame({
-            "hybrid": [r["hybrid"] for r in rows],
-            "importance": [r["importance"] for r in rows],
-            "cosine": [r["cosine"] for r in rows],
-            "bm25": [r["bm25"] for r in rows],
-        })
-        st.bar_chart(chart_df)
+            claims = getattr(patent, "patent_claims", None)
+            if claims:
+                with st.expander("Claims", expanded=False):
+                    if isinstance(claims, (list, tuple)):
+                        st.write("\n\n".join(str(claim) for claim in claims))
+                    else:
+                        st.write(str(claims))
 
-        st.divider()
-        st.subheader("Patent detail")
-        patent_labels = [f"{r['#']}. {r['patent_id']} — {r['title'][:60]}" for r in rows]
-        selected_label = st.selectbox("Select a patent", patent_labels)
-        selected_idx = int(selected_label.split(".")[0]) - 1
-        rp = st.session_state.ranked[selected_idx]
-        p  = rp.patent
-        st.markdown(f"**ID:** `{p.patent_id}`")
-        st.markdown(f"**Title:** {p.patent_title}")
-        _jg = st.session_state.json_groups
-        if _jg:
-            from services.json_query_service import match_groups_in_text
-            _matches = match_groups_in_text(
-                f"{p.patent_title} {p.patent_abstract or ''}", _jg
+            patent_url = (
+                getattr(patent, "patent_url", None)
+                or getattr(patent, "url", None)
+                or getattr(patent, "google_patents_url", None)
             )
-            if _matches:
-                _badge_html = " ".join(_group_badge_html(idx, term) for idx, term in _matches)
-                st.markdown(f"**Matched groups:** {_badge_html}", unsafe_allow_html=True)
-            else:
-                st.caption("🔴 No group terms matched in this patent's title or abstract.")
-        st.markdown(f"**Type:** {p.patent_type or '—'}   **Date:** {p.patent_date or '—'}")
-        def format_score(value):
-            return f"{value:.4f}" if value is not None else "N/A"
+            if patent_url and str(patent_url).startswith(("http://", "https://")):
+                st.link_button("Open original patent", str(patent_url), use_container_width=True)
 
-        st.markdown(
-            f"**Hybrid:** `{format_score(rp.hybrid_score)}`  |  "
-            f"**Importance:** `{format_score(rp.importance_score)}`  |  "
-            f"**Cosine:** `{format_score(rp.cosine_score)}`  |  "
-            f"**BM25:** `{format_score(rp.bm25_score)}`"
-        )
-
-        if rp.importance_hits:
-            matched_concepts = [
-                name
-                for name, hit in rp.importance_hits.items()
-                if hit
-            ]
-            unmatched_concepts = [
-                name
-                for name, hit in rp.importance_hits.items()
-                if not hit
-            ]
-
-            st.markdown("### Search Strategy Match Evidence")
-
-            st.write(
-                f"**Matched concepts:** {len(matched_concepts)} "
-                f"of {len(rp.importance_hits)}"
-            )
-
-            with st.expander("Matched concepts", expanded=True):
-                if matched_concepts:
-                    for name in matched_concepts:
-                        st.write(f"✅ {name}")
-                else:
-                    st.write("No concepts matched.")
-
-            with st.expander("Unmatched concepts"):
-                if unmatched_concepts:
-                    for name in unmatched_concepts:
-                        st.write(f"— {name}")
-                else:
-                    st.write("All evaluated concepts matched.")
-        if p.patent_abstract:
-            with st.expander("Abstract"):
-                st.write(p.patent_abstract)
     else:
         st.info("Run the pipeline to see ranked patents here.")
 
-# ── Tab 4: Claude Technical Analysis ───────────────────────────────────────────────────
-with tab_claude:
+# ── Screen 4: Claude Technical Analysis ──────────────────────────────────────
+elif result_view == "Claude Technical Analysis":
     if st.session_state.stage < 3:
-        st.info("Complete stages 1–3 first, then click **Send Ranked Results to Claude**.")
+        st.info("Complete stages 1–3 first, then send the ranked results to Claude.")
     elif st.session_state.stage == 3:
-        st.warning("Top 20 are ready. Click **Send Top 20 to Claude** to continue.")
+        st.success(f"Top {len(st.session_state.ranked)} ranked patents are ready for technical comparison.")
+        if st.button("🤖 Send Top 20 to Claude", type="primary", key="send_top20_to_claude_screen", width="stretch"):
+            try:
+                st.session_state.comparison = ""
+                st.session_state.report = ""
+                with st.spinner("Calling Claude for technical comparison…"):
+                    comparison = _timed(
+                        "4. Claude comparison",
+                        _run_claude,
+                        query,
+                        st.session_state.ranked,
+                    )
+                st.session_state.comparison = comparison
+                st.session_state.stage = 4
+                st.rerun()
+            except Exception as exc:
+                logger.exception("Unhandled exception during Claude comparison from analysis screen")
+                st.session_state.error = f"{type(exc).__name__}: {exc}"
+                st.error(st.session_state.error)
     else:
         sub1, sub2 = st.tabs(["Technical Comparison JSON", "Report"])
 
@@ -4222,13 +4716,42 @@ with tab_claude:
 
         with sub2:
             st.subheader("Patent intelligence report")
-            st.markdown(st.session_state.report)
 
-            st.divider()
-            report_bytes = st.session_state.report.encode()
-            st.download_button(
-                "⬇ Download report (.md)",
-                data=report_bytes,
-                file_name="patent_report.md",
-                mime="text/markdown",
-            )
+            if not st.session_state.comparison:
+                st.info("Generate the technical comparison first.")
+            else:
+                if st.button("📝 Generate Report", type="primary"):
+                    try:
+                        from models.claude_client import ClaudeClient
+                        from services.report_service import generate
+
+                        with st.spinner("Generating patent intelligence report…"):
+                            report = _timed(
+                                "5. Claude report",
+                                generate,
+                                query,
+                                st.session_state.ranked,
+                                st.session_state.comparison,
+                                ClaudeClient(),
+                            )
+
+                        st.session_state.report = report
+
+                    except Exception as exc:
+                        logger.exception("Unhandled exception generating report")
+                        st.session_state.error = (
+                            f"{type(exc).__name__}: {exc}"
+                        )
+
+                if st.session_state.report:
+                    st.markdown(st.session_state.report)
+
+                    st.divider()
+                    st.download_button(
+                        "⬇ Download report (.md)",
+                        data=st.session_state.report.encode(),
+                        file_name="patent_report.md",
+                        mime="text/markdown",
+                    )
+                else:
+                    st.caption("The report has not been generated yet.")

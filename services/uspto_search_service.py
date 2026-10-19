@@ -1,4 +1,3 @@
-
 """USPTO Open Data Portal patent search service.
 
 Uses the current USPTO ODP Patent Applications Search API.
@@ -233,6 +232,58 @@ def _get_continuity_family_id(raw: dict) -> str | None:
     return parent_candidates[0][1]
 
 
+def _normalize_cpc_classifications(value: object) -> list[str]:
+    """Normalize CPC classifications from the varying ODP response shapes.
+
+    ODP may return the classification bag as strings or as objects containing
+    a classification symbol. Converting a dict with ``str(item)`` produces a
+    Python dictionary representation, not a usable CPC code; this helper
+    extracts only plausible code-bearing fields and removes duplicates.
+    """
+    if value is None:
+        return []
+
+    # Field names seen in classification payloads; support common variants
+    # without accidentally treating descriptive metadata as a classification.
+    code_keys = (
+        "classificationSymbol",
+        "cpcClassificationSymbol",
+        "classificationCode",
+        "cpcClassificationCode",
+        "symbol",
+        "code",
+    )
+    nested_keys = (
+        "classification",
+        "cpcClassification",
+        "classificationData",
+    )
+
+    if isinstance(value, str):
+        code = " ".join(value.split()).strip()
+        return [code] if code else []
+
+    if isinstance(value, dict):
+        for key in code_keys:
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                code = " ".join(candidate.split()).strip()
+                return [code]
+        result: list[str] = []
+        for key in nested_keys:
+            if key in value:
+                result.extend(_normalize_cpc_classifications(value[key]))
+        return list(dict.fromkeys(result))
+
+    if isinstance(value, (list, tuple, set)):
+        result: list[str] = []
+        for item in value:
+            result.extend(_normalize_cpc_classifications(item))
+        return list(dict.fromkeys(result))
+
+    return []
+
+
 def _build_patent_record(raw: dict) -> PatentRecord | None:
     """Convert one USPTO ODP record into PatentRecord."""
 
@@ -248,13 +299,9 @@ def _build_patent_record(raw: dict) -> PatentRecord | None:
         or None
     )
 
-    cpc_classifications = [
-        str(item).strip()
-        for item in (
-            metadata.get("cpcClassificationBag") or []
-        )
-        if str(item).strip()
-    ]
+    cpc_classifications = _normalize_cpc_classifications(
+        metadata.get("cpcClassificationBag")
+    )
 
     application_number = (
         raw.get("applicationNumberText")

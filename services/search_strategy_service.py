@@ -353,10 +353,6 @@ def build_boolean_search(strategy: SearchStrategy) -> str:
         expression for expression in concept_expressions if expression
     )
 
-    print("\n===== GENERATED BOOLEAN SEARCH =====")
-    print(boolean_query)
-    print("====================================\n")
-
     return boolean_query
 
 

@@ -31,7 +31,7 @@ sqlalchemy>=2.0                 # MySQL / Postgres repository layer
 mysql-connector-python>=8.0     # MySQL driver for SQLAlchemy (mysql+mysqlconnector://)
 
 # UI
-streamlit>=1.35.0               # interactive test / demo app (streamlit_app.py)
+streamlit>=1.50.0               # interactive test / demo app (streamlit_app.py)
 
 # API Layer (future SaaS exposure)
 fastapi>=0.110

@@ -9,6 +9,8 @@ Run with:
 import sys
 import json
 import time
+import hashlib
+import pickle
 from pathlib import Path
 
 import streamlit as st
@@ -120,6 +122,23 @@ def _reset():
     for k, v in _DEFAULTS.items():
         if k not in _preserved_keys:
             st.session_state[k] = v
+
+
+def _get_cached_classification_data(patents):
+    """Reuse classification aggregates for an unchanged patent result set."""
+    cache = st.session_state.setdefault("_classification_cache", {})
+
+    fingerprint = hashlib.sha256(
+        pickle.dumps(patents, protocol=pickle.HIGHEST_PROTOCOL)
+    ).hexdigest()
+
+    if fingerprint not in cache:
+        cache[fingerprint] = aggregate_classifications(patents)
+
+    while len(cache) > 3:
+        cache.pop(next(iter(cache)))
+
+    return cache[fingerprint]
 
 
 # ── sidebar ─────────────────────────────────────────────────────────────────────
@@ -3254,7 +3273,7 @@ elif result_view == "Search Results":
         "Patent IDs are retained for later refinement."
     )
 
-    classification_data = aggregate_classifications(
+    classification_data = _get_cached_classification_data(
         st.session_state.unique_patents
     )
 

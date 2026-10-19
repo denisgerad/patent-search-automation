@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -156,6 +157,7 @@ def _merge_entries(
     return merged
 
 
+@lru_cache(maxsize=4096)
 def get_cpc_catalogue_entry(
     code: str,
 ) -> dict[str, Any] | None:

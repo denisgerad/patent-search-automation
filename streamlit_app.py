@@ -2501,38 +2501,39 @@ elif result_view == "Search Results":
     st.markdown("### CPC")
 
     if cpc_data:
-        cpc_rows = []
-        for classification, data in sorted(
-            cpc_data.items(),
-            key=lambda x: x[1]["count"],
-            reverse=True,
-        ):
-            catalogue_entry = get_cpc_catalogue_entry(classification)
-            cpc_title = (
-                catalogue_entry["title"]
-                if catalogue_entry
-                else "—"
-            )
+        with st.spinner("Loading CPC classifications and preparing table…"):
+            cpc_rows = []
+            for classification, data in sorted(
+                cpc_data.items(),
+                key=lambda x: x[1]["count"],
+                reverse=True,
+            ):
+                catalogue_entry = get_cpc_catalogue_entry(classification)
+                cpc_title = (
+                    catalogue_entry["title"]
+                    if catalogue_entry
+                    else "—"
+                )
 
-            cpc_rows.append(
-                {
-                    "CPC": classification,
-                    "CPC title": cpc_title,
-                    "Patents": data["count"],
-                    "% of results": round(
-                        data["count"]
-                        / len(st.session_state.unique_patents)
-                        * 100,
-                        1,
-                    ),
-                }
-            )
+                cpc_rows.append(
+                    {
+                        "CPC": classification,
+                        "CPC title": cpc_title,
+                        "Patents": data["count"],
+                        "% of results": round(
+                            data["count"]
+                            / len(st.session_state.unique_patents)
+                            * 100,
+                            1,
+                        ),
+                    }
+                )
 
-        st.dataframe(
-            pd.DataFrame(cpc_rows),
-            width="stretch",
-            hide_index=True,
-        )
+            st.dataframe(
+                pd.DataFrame(cpc_rows),
+                width="stretch",
+                hide_index=True,
+            )
 
         st.markdown("#### Review CPC Classifications")
 

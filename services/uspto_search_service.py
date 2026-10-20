@@ -284,6 +284,38 @@ def _normalize_cpc_classifications(value: object) -> list[str]:
     return []
 
 
+def _extract_applicant_assignee(metadata: dict) -> str | None:
+    """Extract applicant names from USPTO application metadata."""
+    names: list[str] = []
+
+    applicant_bag = metadata.get("applicantBag") or []
+
+    if isinstance(applicant_bag, dict):
+        applicant_bag = [applicant_bag]
+
+    if isinstance(applicant_bag, list):
+        for applicant in applicant_bag:
+            if not isinstance(applicant, dict):
+                continue
+
+            name = str(
+                applicant.get("applicantNameText") or ""
+            ).strip()
+
+            if name and name not in names:
+                names.append(name)
+
+    if not names:
+        first_applicant = str(
+            metadata.get("firstApplicantName") or ""
+        ).strip()
+
+        if first_applicant:
+            names.append(first_applicant)
+
+    return "; ".join(names) if names else None
+
+
 def _build_patent_record(raw: dict) -> PatentRecord | None:
     """Convert one USPTO ODP record into PatentRecord."""
 
@@ -336,6 +368,8 @@ def _build_patent_record(raw: dict) -> PatentRecord | None:
         or None
     )
 
+    applicant_assignee = _extract_applicant_assignee(metadata)
+
     if not patent_id:
         return None
 
@@ -368,6 +402,7 @@ def _build_patent_record(raw: dict) -> PatentRecord | None:
             patent_claims=claims_text or None,
             patent_type=patent_type or None,
             patent_date=str(patent_date) if patent_date else None,
+            applicant_assignee=applicant_assignee,
             continuity_family_id=continuity_family_id,
             uspc_class=uspc_class,
             uspc_subclass=uspc_subclass,
@@ -622,6 +657,26 @@ def search_patents_by_strategy(
 
     data = response.json()
     raw_records = data.get("patentFileWrapperDataBag", [])
+
+    # Temporary diagnostic: inspect USPTO applicant/assignee metadata.
+    print("\n=== USPTO RESPONSE DIAGNOSTIC ===")
+    print("Top-level keys:", list(data.keys()))
+    print("Number of records:", len(raw_records))
+
+    if raw_records:
+        record = raw_records[0]
+        print("Record keys:", list(record.keys()))
+
+        metadata = record.get("applicationMetaData") or {}
+        print("Metadata keys:", list(metadata.keys()))
+
+        for key, value in metadata.items():
+            if any(term in key.lower() for term in (
+                "applicant", "assignee", "inventor", "party", "organization"
+            )):
+                print(f"{key}: {value!r}")
+
+    print("=== END DIAGNOSTIC ===\n")
 
     log.info(
         "USPTO strategy search returned %d raw records "

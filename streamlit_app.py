@@ -2501,39 +2501,31 @@ elif result_view == "Search Results":
     st.markdown("### CPC")
 
     if cpc_data:
-        with st.spinner("Loading CPC classifications and preparing table…"):
-            cpc_rows = []
+        # Keep the initial frequency table lightweight.
+        # Official catalogue details are loaded on demand below.
+        total_patents = len(st.session_state.unique_patents)
+
+        cpc_rows = [
+            {
+                "CPC": classification,
+                "Patents": data["count"],
+                "% of results": round(
+                    data["count"] / total_patents * 100,
+                    1,
+                ) if total_patents else 0.0,
+            }
             for classification, data in sorted(
                 cpc_data.items(),
-                key=lambda x: x[1]["count"],
+                key=lambda item: item[1]["count"],
                 reverse=True,
-            ):
-                catalogue_entry = get_cpc_catalogue_entry(classification)
-                cpc_title = (
-                    catalogue_entry["title"]
-                    if catalogue_entry
-                    else "—"
-                )
-
-                cpc_rows.append(
-                    {
-                        "CPC": classification,
-                        "CPC title": cpc_title,
-                        "Patents": data["count"],
-                        "% of results": round(
-                            data["count"]
-                            / len(st.session_state.unique_patents)
-                            * 100,
-                            1,
-                        ),
-                    }
-                )
-
-            st.dataframe(
-                pd.DataFrame(cpc_rows),
-                width="stretch",
-                hide_index=True,
             )
+        ]
+
+        st.dataframe(
+            pd.DataFrame(cpc_rows),
+            width="stretch",
+            hide_index=True,
+        )
 
         st.markdown("#### Review CPC Classifications")
 
@@ -3776,6 +3768,9 @@ elif result_view == "Technical Relevance":
             rows.append({
                 "Patent ID": str(getattr(rp.patent, "patent_id", "") or "—"),
                 "Title": str(getattr(rp.patent, "patent_title", "") or "Untitled patent"),
+                "Applicant / Assignee": (
+                    getattr(rp.patent, "applicant_assignee", None) or "—"
+                ),
                 "Type": getattr(rp.patent, "patent_type", None) or "—",
                 "Date": getattr(rp.patent, "patent_date", None) or "—",
                 "Hybrid score": round(rp.hybrid_score, 4) if rp.hybrid_score is not None else None,
@@ -3799,6 +3794,10 @@ elif result_view == "Technical Relevance":
                 column_config={
                     "Patent ID": st.column_config.TextColumn(width="medium"),
                     "Title": st.column_config.TextColumn(width="large"),
+                    "Applicant / Assignee": st.column_config.TextColumn(
+                        "Applicant / Assignee",
+                        width="medium",
+                    ),
                     "Hybrid score": st.column_config.NumberColumn(format="%.4f", width="small"),
                     "BM25 score": st.column_config.NumberColumn(format="%.4f", width="small"),
                     "Cosine score": st.column_config.NumberColumn(format="%.4f", width="small"),
@@ -3945,13 +3944,64 @@ elif result_view == "Claude Technical Analysis":
 
         with sub1:
             st.subheader("Structured technical comparison")
+
             try:
                 parsed = json.loads(st.session_state.comparison)
                 comp_df = pd.DataFrame(parsed)
-                st.dataframe(comp_df, width="stretch", hide_index=True)
-            except (json.JSONDecodeError, Exception):
-                st.text_area("Raw comparison output", st.session_state.comparison,
-                             height=400)
+
+                if "overlap_level" in comp_df.columns:
+
+                    label_map = {
+                        "high": "Good",
+                        "medium": "Moderate",
+                        "low": "Weak",
+                    }
+
+                    comp_df["overlap_level"] = (
+                        comp_df["overlap_level"]
+                        .astype(str)
+                        .str.strip()
+                        .str.lower()
+                        .replace(label_map)
+                    )
+
+                    comp_df = comp_df.rename(
+                        columns={"overlap_level": "Technical Overlap"}
+                    )
+
+                    def style_overlap(value):
+                        styles = {
+                            "Good": "background-color: #DCFCE7; color: #166534;",
+                            "Moderate": "background-color: #FEF3C7; color: #92400E;",
+                            "Weak": "background-color: #FEE2E2; color: #991B1B;",
+                        }
+                        return styles.get(value, "")
+
+                    styled_df = comp_df.style.map(
+                        style_overlap,
+                        subset=["Technical Overlap"],
+                    )
+
+                    st.dataframe(
+                        styled_df,
+                        width="stretch",
+                        hide_index=True,
+                    )
+
+                else:
+                    st.dataframe(
+                        comp_df,
+                        width="stretch",
+                        hide_index=True,
+                    )
+
+            except Exception as exc:
+                st.warning(f"Unable to display structured comparison: {exc}")
+                st.text_area(
+                    "Raw comparison output",
+                    st.session_state.comparison,
+                    height=400,
+                )
 
         with sub2:
             st.subheader("Patent intelligence report")

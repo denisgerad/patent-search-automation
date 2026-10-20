@@ -20,6 +20,7 @@ class PatentRecord(BaseModel):
     patent_claims: Optional[str] = None
     patent_type: Optional[str] = None
     patent_date: Optional[str] = None
+    applicant_assignee: Optional[str] = None
     continuity_family_id: Optional[str] = None
     search_paths: list[str] = Field(default_factory=list)
 

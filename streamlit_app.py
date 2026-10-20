@@ -2501,31 +2501,42 @@ elif result_view == "Search Results":
     st.markdown("### CPC")
 
     if cpc_data:
-        # Keep the initial frequency table lightweight.
-        # Official catalogue details are loaded on demand below.
         total_patents = len(st.session_state.unique_patents)
 
-        cpc_rows = [
-            {
-                "CPC": classification,
-                "Patents": data["count"],
-                "% of results": round(
-                    data["count"] / total_patents * 100,
-                    1,
-                ) if total_patents else 0.0,
-            }
+        with st.spinner("Loading CPC titles and preparing table…"):
+            cpc_rows = []
+
             for classification, data in sorted(
                 cpc_data.items(),
                 key=lambda item: item[1]["count"],
                 reverse=True,
-            )
-        ]
+            ):
+                # Read the official title from the existing MySQL-backed
+                # catalogue service. This lookup is LRU-cached.
+                catalogue_entry = get_cpc_catalogue_entry(classification)
+                cpc_title = (
+                    catalogue_entry.get("title")
+                    if catalogue_entry
+                    else None
+                )
 
-        st.dataframe(
-            pd.DataFrame(cpc_rows),
-            width="stretch",
-            hide_index=True,
-        )
+                cpc_rows.append(
+                    {
+                        "CPC": classification,
+                        "CPC title": cpc_title or "—",
+                        "Patents": data["count"],
+                        "% of results": round(
+                            data["count"] / total_patents * 100,
+                            1,
+                        ) if total_patents else 0.0,
+                    }
+                )
+
+            st.dataframe(
+                pd.DataFrame(cpc_rows),
+                width="stretch",
+                hide_index=True,
+            )
 
         st.markdown("#### Review CPC Classifications")
 
@@ -3947,6 +3958,7 @@ elif result_view == "Claude Technical Analysis":
 
             try:
                 parsed = json.loads(st.session_state.comparison)
+
                 comp_df = pd.DataFrame(parsed)
 
                 if "overlap_level" in comp_df.columns:
